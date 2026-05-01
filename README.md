@@ -3,10 +3,11 @@
 LLM-augmented property-based fuzzer for detecting **arbitrary code execution
 (ACE)** primitives in Python packages.
 
-> **Status:** v0 (pre-alpha). The deterministic core — static sink inventory,
-> audit-hook oracle, Hypothesis-driven worker — is implemented and tested.
-> The LLM-driven discovery, reachability, and strategy-synthesis layer is not
-> yet wired up.
+> **Status:** v0.2 (pre-alpha). End-to-end campaign pipeline is wired:
+> static sink scan → LLM target discovery → LLM reachability per target →
+> LLM strategy synthesis per flow → parallel worker subprocesses →
+> witness collection. CLI (`arbiter scan`) drives the whole thing. Triage
+> ranking and report generation are not yet wired.
 
 Arbiter combines three signals that, individually, miss real-world exploits:
 
@@ -34,23 +35,28 @@ uv pip install -e ".[dev]"
 
 ## Usage
 
-The end-user CLI is not yet wired. The worker subprocess is functional and
-can be driven directly:
-
 ```bash
-echo '{
-  "target_module": "vulnpkg.api",
-  "target_qualname": "eval_expression",
-  "marker": "abcd1234",
-  "max_examples": 50,
-  "strategy": {
-    "kind": "text",
-    "seeds": ["{MARKER} + 1", "__import__(\"os\").system(\"echo {MARKER}\")"]
-  }
-}' | python -m arbiter.worker
+arbiter scan path/to/package --package-name mypkg --output-json result.json
 ```
 
-The worker emits one JSON line per witness on stdout, then a summary line.
+End-to-end campaign: static sink scan → LLM-driven target discovery and
+reachability → strategy synthesis → parallel worker subprocesses →
+witness aggregation. Exits 0 if any witnesses are found, 1 otherwise.
+
+Useful flags:
+
+| Flag                     | Default | What it does                                      |
+|--------------------------|---------|---------------------------------------------------|
+| `--package-name, -n`     | dirname | Importable name passed to workers                 |
+| `--max-examples`         | 100     | Hypothesis examples per flow                      |
+| `--confidence-threshold` | 0.5     | Drop flows below this reachability confidence     |
+| `--parallelism, -j`      | 4       | Concurrent worker subprocesses                    |
+| `--worker-timeout`       | 60      | Per-worker wall-clock seconds                     |
+| `--output-json, -o`      | (none)  | Write the full `CampaignResult` as JSON           |
+| `--verbose, -v`          | off     | Stage-by-stage progress logs                      |
+
+The worker can also be driven directly for debugging — see
+[`DESIGN.md`](DESIGN.md) §5.2 for the IPC contract.
 
 Run the test suite to validate the core end-to-end against a deliberately
 vulnerable fixture package:
@@ -59,19 +65,35 @@ vulnerable fixture package:
 pytest
 ```
 
+Live LLM tests are skipped automatically unless the `claude` CLI is on
+PATH (Arbiter reuses your existing Claude Code authentication — no
+separate API key required):
+
+```bash
+pytest tests/test_synthesize_live.py -v
+```
+
 ## Layout
 
 ```
 src/arbiter/
-  models.py    Pydantic IPC contracts (Sink, Flow, Witness, HarnessSpec, ...)
-  sinks.py     AST sink inventory (7 sink families, alias resolution)
-  oracle.py    Audit-hook listener + marker taint + internal-frame filter
-  worker.py    Subprocess entry; Hypothesis-driven harness runner
+  models.py           Pydantic IPC contracts (Sink, Flow, Witness, HarnessSpec)
+  sinks.py            AST sink inventory (7 sink families, alias resolution)
+  oracle.py           Audit-hook listener + marker taint + internal-frame filter
+  worker.py           Subprocess entry; Hypothesis-driven harness runner
+  orchestrator.py     Campaign pipeline + worker pool (ThreadPoolExecutor)
+  cli.py              `arbiter scan` typer entry point
+  llm/
+    sdk.py            ClaudeHeadlessClient (`claude -p`) + LLMClient Protocol
+    synthesize.py     Strategy synthesizer: (target, sink) -> StrategySpec
+    discover.py       Target discovery via claude -p agent mode
+    reachability.py   Flow generation via claude -p agent mode
 tests/
-  fixtures/vulnpkg/    Known-vulnerable package (eval / yaml / jinja2)
-  test_sinks.py        AST scan tests
-  test_oracle.py       Audit-hook tests (subprocess-isolated)
-  test_worker.py       End-to-end worker tests
+  fixtures/vulnpkg/   Known-vulnerable package (eval / yaml / jinja2)
+  test_sinks.py       test_oracle.py      test_worker.py
+  test_synthesize.py  test_discover.py    test_reachability.py
+  test_orchestrator.py test_cli.py
+  test_*_live.py      (skipped when `claude` CLI is missing)
 ```
 
 See [`DESIGN.md`](DESIGN.md) for the architecture, threat model, detection
