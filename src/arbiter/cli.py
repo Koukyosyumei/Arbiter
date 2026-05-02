@@ -10,6 +10,7 @@ from typing import Annotated
 import typer
 
 from arbiter.orchestrator import CampaignConfig, CampaignResult, run_campaign
+from arbiter.report import write_reports
 
 app = typer.Typer(
     name="arbiter",
@@ -37,12 +38,17 @@ def _format_summary(result: CampaignResult) -> str:
     ]
     if result.errors:
         lines.append(f"errors: {len(result.errors)}")
-    if result.witnesses:
+    if result.scored_witnesses:
         lines.append("")
-        lines.append("witnesses:")
-        for w in result.witnesses:
+        lines.append("ranked witnesses:")
+        for sw in result.scored_witnesses:
+            w = sw.witness
             tainted = "[TAINTED]" if w.event.tainted else "[untainted]"
-            lines.append(f"  {tainted} {w.target_fqn} -> {w.event.name} ({w.event.family.value})")
+            intent = " (intended)" if sw.intended_behavior_reason else ""
+            lines.append(
+                f"  {sw.score.final:.3f}  {tainted} {w.target_fqn} -> "
+                f"{w.event.name} ({w.event.family.value}){intent}"
+            )
     return "\n".join(lines)
 
 
@@ -76,6 +82,14 @@ def scan(
         Path | None,
         typer.Option("--output-json", "-o", help="Write full CampaignResult as JSON."),
     ] = None,
+    report_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--report-dir",
+            "-r",
+            help="Write per-witness markdown advisories + standalone PoC scripts.",
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Verbose logs.")] = False,
 ) -> None:
     """Run a full ACE-detection campaign against a Python package."""
@@ -108,10 +122,17 @@ def scan(
             "flows": [f.model_dump(mode="json") for f in result.flows],
             "strategies": {k: v.model_dump(mode="json") for k, v in result.strategies.items()},
             "witnesses": [w.model_dump(mode="json") for w in result.witnesses],
+            "scored_witnesses": [
+                sw.model_dump(mode="json") for sw in result.scored_witnesses
+            ],
             "errors": result.errors,
         }
         output_json.write_text(json.dumps(payload, indent=2, default=str))
         typer.echo(f"wrote {output_json}", err=True)
+
+    if report_dir is not None and result.scored_witnesses:
+        written = write_reports(result.scored_witnesses, report_dir, config.package_path)
+        typer.echo(f"wrote {len(written)} report files to {report_dir}", err=True)
 
     raise typer.Exit(0 if result.witnesses else 1)
 

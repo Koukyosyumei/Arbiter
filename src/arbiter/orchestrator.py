@@ -33,6 +33,7 @@ from arbiter.llm.synthesize import synthesize_strategy
 from arbiter.models import (
     Flow,
     HarnessSpec,
+    ScoredWitness,
     Sink,
     StrategySpec,
     Target,
@@ -41,6 +42,7 @@ from arbiter.models import (
 )
 from arbiter.payloads import get_seed_corpus
 from arbiter.sinks import scan_path
+from arbiter.triage import triage_campaign
 
 MAX_SEEDS_PER_STRATEGY = 30
 
@@ -67,6 +69,7 @@ class CampaignResult:
     flows: list[Flow] = field(default_factory=list)
     strategies: dict[str, StrategySpec] = field(default_factory=dict)
     witnesses: list[Witness] = field(default_factory=list)
+    scored_witnesses: list[ScoredWitness] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -246,4 +249,10 @@ def run_campaign(
         len(result.witnesses),
         len(harnesses),
     )
+
+    # 7. Triage — rank witnesses for the report. Cheap, deterministic, no LLM.
+    result.scored_witnesses = triage_campaign(
+        result.witnesses, result.targets, result.flows
+    )
+
     return result

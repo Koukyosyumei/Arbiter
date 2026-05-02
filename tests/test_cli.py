@@ -46,11 +46,15 @@ def _sample_result() -> CampaignResult:
         marker_hits=["MARKER"],
     )
     witness = Witness(target_fqn=target.fqn, flow=flow, event=event, input_repr="'MARKER + 1'")
+    from arbiter.triage import triage_campaign
+
+    scored = triage_campaign([witness], [target], [flow])
     return CampaignResult(
         targets=[target],
         sinks=[sink],
         flows=[flow],
         witnesses=[witness],
+        scored_witnesses=scored,
     )
 
 
@@ -122,3 +126,36 @@ def test_scan_passes_config_to_orchestrator(monkeypatch, tmp_path: Path):
     assert cfg.max_examples_per_flow == 42
     assert cfg.flow_confidence_threshold == 0.7
     assert cfg.parallelism == 2
+
+
+def test_scan_writes_reports_to_dir(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(cli_module, "run_campaign", lambda config: _sample_result())
+    report_dir = tmp_path / "reports"
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_module.app,
+        ["scan", str(pkg_dir), "--report-dir", str(report_dir)],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert report_dir.exists()
+    files = list(report_dir.iterdir())
+    md_files = [f for f in files if f.suffix == ".md"]
+    py_files = [f for f in files if f.suffix == ".py"]
+    assert md_files, "expected at least one advisory"
+    assert py_files, "expected at least one PoC"
+
+
+def test_scan_summary_shows_ranked_witnesses_with_scores(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(cli_module, "run_campaign", lambda config: _sample_result())
+    runner = CliRunner()
+    result = runner.invoke(cli_module.app, ["scan", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "ranked witnesses:" in result.stdout
+    # Scored line shape: "<float>  [TAINTED] <fqn> -> <event>"
+    assert "[TAINTED]" in result.stdout
+    # First column is a numeric score; just confirm something float-shaped is there.
+    import re
+
+    assert re.search(r"\d\.\d{3}\s+\[TAINTED\]", result.stdout)

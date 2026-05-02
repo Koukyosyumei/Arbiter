@@ -111,8 +111,9 @@ yet wired:
 | **`arbiter.llm.reachability`**| Flow generator (agent mode)          | done       |
 | **`arbiter.orchestrator`**| Campaign coordinator + worker pool      | done       |
 | **`arbiter.cli`**       | `arbiter scan <pkg>`                      | done       |
-| `arbiter.triage`        | Ranking rubric                            | planned    |
-| `arbiter.report`        | Markdown advisory + PoC                   | planned    |
+| **`arbiter.triage`**    | Ranking rubric                            | done       |
+| **`arbiter.report`**    | Markdown advisory + standalone PoC        | done       |
+| **`arbiter.payloads`**  | Curated static seed library (PayloadsAllTheThings) | done |
 
 ---
 
@@ -301,22 +302,27 @@ user message and is the only per-call cost.
 After confirmation and minimization, each witness is scored:
 
 ```
-score = severity(sink_family)
-      × exposure(target.entry)
-      × taint_directness(witness)
-      × novelty(witness, corpus)
-      − intended_behavior_penalty(target, sink)
+final = severity × exposure × directness × novelty × (1 − intent_penalty)
 ```
 
-- **severity** — `code_exec` / `deserialization` / `process` rank highest.
-- **exposure** — `network` > `cli` > `library` > `internal`.
-- **taint_directness** — heuristic: number of intermediate frames between
-  the entry call and the sink call in the witness stack.
-- **novelty** — `1.0` if `(family, sink_qualname, normalized_stack_top)` is
-  unseen in the corpus; lower if dedup'd against prior witnesses.
-- **intended-behavior penalty** — set when the package's own test suite
-  hits the same sink under canonical use, or when the LLM triage classifier
-  reads the docstring and concludes the sink is documented behavior.
+- **severity** — `critical` (1.0) for code_exec / deserialization / process;
+  `high` (0.7) for template / xml / import_; `medium` (0.5) for path.
+- **exposure** — `network` (1.0) > `cli` (0.8) > `library` (0.6) > `internal` (0.3).
+- **directness** — `1 / (1 + len(flow.intermediate))`. Direct call → 1.0;
+  one hop → 0.5; two hops → 0.33.
+- **novelty** — within-campaign fingerprint dedup. First witness with a
+  given `(family, sink_qualname, top_stack_frame)` gets 1.0; repeats get
+  0.5, 0.3, 0.2, ... Cross-campaign novelty is a v0.5 concern.
+- **intent_penalty** — multiplicative; capped at 0.4 in v0.4. Triggered by
+  per-family keyword matches in the target docstring (e.g. "evaluate" /
+  "expression" / "compile" for code_exec). Multiplicative rather than
+  subtractive so even fully-intended sinks still report at 60% strength —
+  the entry point is still attacker-reachable; security review may still
+  want auth or a sandbox.
+
+The LLM-driven intent classifier (read the docstring, return JSON
+`{intended, confidence, rationale}`) is a v0.5 follow-up; the v0.4
+heuristic catches the obvious cases without an extra Haiku call.
 
 This rubric is borrowed from [Maaz et al.][maaz] (their 56% → 86%
 precision-after-ranking gain) and adapted for ACE: severity floor instead

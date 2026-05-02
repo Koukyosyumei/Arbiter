@@ -109,6 +109,28 @@ class Witness(BaseModel):
         return f"{self.event.family.value}|{self.event.name}|{top_frame}"
 
 
+class ScoreBreakdown(BaseModel):
+    """Per-witness score components. Final = raw × (1 − intent_penalty)."""
+
+    severity: float
+    exposure: float
+    directness: float
+    novelty: float
+    intent_penalty: float = 0.0
+    raw: float
+    final: float
+
+
+class ScoredWitness(BaseModel):
+    """A Witness annotated with its triage score and contextual handles."""
+
+    witness: Witness
+    target: Target | None = None
+    flow: Flow | None = None
+    score: ScoreBreakdown
+    intended_behavior_reason: str | None = None
+
+
 # --- worker IPC ---
 
 

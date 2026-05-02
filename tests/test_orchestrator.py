@@ -82,6 +82,10 @@ def test_run_campaign_finds_witnesses_with_stubbed_llm(monkeypatch):
     tainted = [w for w in result.witnesses if w.event.tainted]
     assert tainted, f"no tainted witnesses: {result.witnesses}"
     assert any(w.event.family is SinkFamily.code_exec for w in tainted)
+    # Triage runs at the end; scored_witnesses must mirror witnesses, ranked.
+    assert len(result.scored_witnesses) == len(result.witnesses)
+    scores = [sw.score.final for sw in result.scored_witnesses]
+    assert scores == sorted(scores, reverse=True)
 
 
 def test_run_campaign_filters_by_confidence(monkeypatch):
