@@ -195,3 +195,69 @@ def test_run_campaign_no_flows_means_no_workers(monkeypatch):
     )
     result = orch.run_campaign(config, llm=object())
     assert result.witnesses == []
+
+
+def test_run_campaign_merges_static_corpus_with_llm_seeds(monkeypatch):
+    """Strategy fed to workers must include both static corpus and LLM seeds."""
+    from arbiter.payloads import get_seed_corpus
+
+    target = _eval_target()
+    sink = _eval_sink()
+    flow = Flow(target_fqn=target.fqn, sink=sink, confidence=0.9)
+    llm_seeds = ["LLM_UNIQUE_{MARKER}_a", "LLM_UNIQUE_{MARKER}_b"]
+    static_seeds = get_seed_corpus(SinkFamily.code_exec)
+
+    monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: [target])
+    monkeypatch.setattr(orch, "analyze_reachability", lambda *a, **kw: [flow])
+    monkeypatch.setattr(
+        orch,
+        "synthesize_strategy",
+        lambda *a, **kw: StrategySpec(kind="text", seeds=llm_seeds),
+    )
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        max_examples_per_flow=5,
+        parallelism=1,
+    )
+    result = orch.run_campaign(config, llm=object())
+
+    assert len(result.strategies) == 1
+    merged_strategy = next(iter(result.strategies.values()))
+    merged = merged_strategy.seeds
+
+    # Both streams represented
+    assert any(s in merged for s in llm_seeds), f"LLM seeds missing: {merged}"
+    assert any(s in merged for s in static_seeds), f"static seeds missing: {merged}"
+    # No duplicates after dedupe
+    assert len(merged) == len(set(merged))
+    # Cap respected
+    assert len(merged) <= orch.MAX_SEEDS_PER_STRATEGY
+
+
+def test_run_campaign_caps_merged_seeds(monkeypatch):
+    """If LLM returns many seeds, the cap still holds."""
+    target = _eval_target()
+    sink = _eval_sink()
+    flow = Flow(target_fqn=target.fqn, sink=sink, confidence=0.9)
+    # 50 unique LLM seeds — far above the cap
+    llm_seeds = [f"LLM_{i}_{{MARKER}}" for i in range(50)]
+
+    monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: [target])
+    monkeypatch.setattr(orch, "analyze_reachability", lambda *a, **kw: [flow])
+    monkeypatch.setattr(
+        orch,
+        "synthesize_strategy",
+        lambda *a, **kw: StrategySpec(kind="text", seeds=llm_seeds),
+    )
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        max_examples_per_flow=5,
+        parallelism=1,
+    )
+    result = orch.run_campaign(config, llm=object())
+    merged_strategy = next(iter(result.strategies.values()))
+    assert len(merged_strategy.seeds) == orch.MAX_SEEDS_PER_STRATEGY

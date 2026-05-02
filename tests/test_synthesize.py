@@ -143,10 +143,16 @@ def test_synthesize_strategy_drops_seeds_without_marker():
     assert all("{MARKER}" in s for s in spec.seeds)
 
 
-def test_synthesize_strategy_falls_back_when_no_valid_seeds():
+def test_synthesize_strategy_falls_back_to_static_corpus():
+    """When LLM produces no marker-bearing seeds, fall back to the curated
+    family corpus rather than the bare {MARKER} placeholder."""
+    from arbiter.payloads import get_seed_corpus
+
     fake = _FakeLLM({"kind": "text", "seeds": ["no marker", "still none"]})
     spec = synthesize_strategy(_eval_target(), _eval_sink(), llm=fake)
-    assert spec.seeds == ["{MARKER}"], "expected fallback marker-only seed"
+    static = get_seed_corpus(SinkFamily.code_exec)
+    assert spec.seeds == static, "expected fallback to static corpus"
+    assert len(spec.seeds) >= 4, "static corpus too small to be useful as fallback"
 
 
 def test_synthesize_strategy_normalizes_bad_kind():
