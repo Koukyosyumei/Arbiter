@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from arbiter.models import (
+    AttackerModel,
     AuditEvent,
     Exposure,
     Flow,
@@ -12,6 +13,7 @@ from arbiter.models import (
     Witness,
 )
 from arbiter.triage import (
+    ATTACKER_MODEL_SCORE,
     EXPOSURE_SCORE,
     INTENT_PENALTY,
     SEVERITY_SCORE,
@@ -227,3 +229,76 @@ def test_triage_campaign_links_target_and_flow_back_to_witness():
     ranked = triage_campaign([w], [target], [flow])
     assert ranked[0].target is target
     assert ranked[0].flow is flow
+
+
+# --- attacker_model multiplier ---
+
+
+def test_attacker_model_default_network_is_neutral():
+    target = _target(exposure=Exposure.network)
+    sink = _sink()
+    flow = Flow(target_fqn=target.fqn, sink=sink, attacker_model=AttackerModel.network)
+    w = _witness_for(target, sink)
+    sw = score_witness(w, target, flow)
+    assert sw.score.attacker_model == ATTACKER_MODEL_SCORE[AttackerModel.network] == 1.0
+
+
+def test_attacker_model_loaded_file_content_drops_score():
+    """Same target, same sink — only attacker_model differs. The file-content
+    flow should sort below the network flow."""
+    target = _target(exposure=Exposure.network)
+    sink = _sink()
+    flow_net = Flow(
+        target_fqn=target.fqn,
+        sink=sink,
+        attacker_model=AttackerModel.network,
+    )
+    flow_file = Flow(
+        target_fqn=target.fqn,
+        sink=sink,
+        attacker_model=AttackerModel.loaded_file_content,
+    )
+    w_net = Witness(
+        target_fqn=target.fqn,
+        flow=flow_net,
+        event=_audit_event(),
+        input_repr="x",
+    )
+    w_file = Witness(
+        target_fqn=target.fqn,
+        flow=flow_file,
+        event=_audit_event(),
+        input_repr="y",
+    )
+    sw_net = score_witness(w_net, target, flow_net)
+    sw_file = score_witness(w_file, target, flow_file)
+    assert sw_net.score.final > sw_file.score.final
+    assert sw_file.score.attacker_model == ATTACKER_MODEL_SCORE[AttackerModel.loaded_file_content]
+
+
+def test_attacker_model_inherits_from_target_when_flow_unset():
+    """Flow without an attacker_model override should fall back to target's
+    effective model for scoring."""
+    target = Target(
+        module="m",
+        qualname="open_file",
+        signature="(path)",
+        exposure=Exposure.network,
+        attacker_model=AttackerModel.loaded_file_content,
+    )
+    sink = _sink()
+    flow = Flow(target_fqn=target.fqn, sink=sink)  # attacker_model=None
+    w = _witness_for(target, sink)
+    sw = score_witness(w, target, flow)
+    assert sw.score.attacker_model == ATTACKER_MODEL_SCORE[AttackerModel.loaded_file_content]
+
+
+def test_attacker_model_score_neutral_when_target_and_flow_missing():
+    sink = _sink()
+    w = Witness(
+        target_fqn="m:f",
+        event=_audit_event(),
+        input_repr="x",
+    )
+    sw = score_witness(w, target=None, flow=None)
+    assert sw.score.attacker_model == 1.0

@@ -15,7 +15,7 @@ from arbiter.llm.discover import (
     DISCOVER_TOOLS,
     discover_targets,
 )
-from arbiter.models import Exposure, Target
+from arbiter.models import AttackerModel, Exposure, Target
 
 
 def _canned_response() -> dict:
@@ -117,3 +117,70 @@ def test_discover_targets_respects_max_turns_override():
     fake = FakeLLM(response={"targets": []})
     discover_targets(Path("/tmp/pkg"), "p", llm=fake, max_turns=5)
     assert fake.last["max_turns"] == 5
+
+
+def test_discover_targets_carries_attacker_model_through():
+    fake = FakeLLM(
+        response={
+            "targets": [
+                {
+                    "module": "p.m",
+                    "qualname": "open_project",
+                    "signature": "(path: str) -> None",
+                    "exposure": "network",
+                    "attacker_model": "loaded_file_content",
+                }
+            ]
+        }
+    )
+    targets = discover_targets(Path("/tmp/pkg"), "p", llm=fake)
+    assert targets[0].attacker_model is AttackerModel.loaded_file_content
+    assert targets[0].effective_attacker_model is AttackerModel.loaded_file_content
+
+
+def test_discover_targets_default_attacker_model_inferred_from_exposure():
+    """When attacker_model is omitted, the Target's effective model should
+    fall back to the exposure-derived default (network → network, cli → argv)."""
+    fake = FakeLLM(
+        response={
+            "targets": [
+                {
+                    "module": "p.m",
+                    "qualname": "handle",
+                    "signature": "(req)",
+                    "exposure": "network",
+                },
+                {
+                    "module": "p.m",
+                    "qualname": "main",
+                    "signature": "()",
+                    "exposure": "cli",
+                },
+            ]
+        }
+    )
+    targets = discover_targets(Path("/tmp/pkg"), "p", llm=fake)
+    by_qual = {t.qualname: t for t in targets}
+    assert by_qual["handle"].attacker_model is None
+    assert by_qual["handle"].effective_attacker_model is AttackerModel.network
+    assert by_qual["main"].effective_attacker_model is AttackerModel.argv
+
+
+def test_discover_targets_drops_unknown_attacker_model():
+    fake = FakeLLM(
+        response={
+            "targets": [
+                {
+                    "module": "p.m",
+                    "qualname": "f",
+                    "signature": "()",
+                    "exposure": "library",
+                    "attacker_model": "alien_invasion",
+                }
+            ]
+        }
+    )
+    targets = discover_targets(Path("/tmp/pkg"), "p", llm=fake)
+    assert len(targets) == 1
+    assert targets[0].attacker_model is None  # unknown → fall back to default
+    assert targets[0].effective_attacker_model is AttackerModel.network  # library default

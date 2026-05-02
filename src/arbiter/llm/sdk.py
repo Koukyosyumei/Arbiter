@@ -18,15 +18,24 @@ but disables OAuth auth — for a v0 default we accept the tradeoff.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 DEFAULT_MODEL = "haiku"
-DEFAULT_TIMEOUT_S = 120.0
+# 300s tolerates real-codebase reachability calls (the agent reads multiple
+# files, traces calls, and emits structured output). Vulnpkg-scale calls
+# finish in 20-80s; 300s is the safety margin on real packages.
+DEFAULT_TIMEOUT_S = 300.0
+DEFAULT_RETRIES = 1
+RETRY_BACKOFF_S = 5.0  # brief delay between attempts on non-timeout errors
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -62,12 +71,18 @@ class LLMClient(Protocol):
 
 @dataclass(slots=True)
 class ClaudeHeadlessClient:
-    """Spawns `claude -p` per call. Inherits the user's Claude Code auth."""
+    """Spawns `claude -p` per call. Inherits the user's Claude Code auth.
+
+    On transient failures the client retries once before raising:
+      - `subprocess.TimeoutExpired` → retry with doubled timeout
+      - non-zero exit                → wait `RETRY_BACKOFF_S` then retry
+    """
 
     model: str = DEFAULT_MODEL
     binary: str = "claude"
     timeout_s: float = DEFAULT_TIMEOUT_S
     extra_args: list[str] = field(default_factory=list)
+    retries: int = DEFAULT_RETRIES
 
     def complete_json(
         self,
@@ -83,6 +98,69 @@ class ClaudeHeadlessClient:
         if shutil.which(self.binary) is None:
             raise RuntimeError(f"claude CLI not found on PATH (looked for {self.binary!r})")
 
+        timeout = self.timeout_s
+        current_max_turns = max_turns
+        last_err: Exception | None = None
+        for attempt in range(self.retries + 1):
+            cmd = self._build_cmd(
+                system=system,
+                user=user,
+                schema=schema,
+                tools=tools,
+                add_dirs=add_dirs,
+                max_turns=current_max_turns,
+                system_mode=system_mode,
+            )
+            try:
+                wrapper = self._invoke(cmd, timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                last_err = exc
+                if attempt < self.retries:
+                    timeout *= 2
+                    log.warning(
+                        "claude -p timed out after %.0fs; retrying with %.0fs",
+                        exc.timeout if exc.timeout else timeout / 2,
+                        timeout,
+                    )
+                    continue
+                raise
+            except RuntimeError as exc:
+                last_err = exc
+                if attempt < self.retries:
+                    # `error_max_turns` means the agent ran out of turns before
+                    # finishing; same budget on retry will fail the same way.
+                    # Double the turn budget for the next attempt.
+                    if "error_max_turns" in str(exc) and current_max_turns is not None:
+                        new_turns = current_max_turns * 2
+                        log.warning(
+                            "claude -p hit max_turns=%d; retrying with %d",
+                            current_max_turns,
+                            new_turns,
+                        )
+                        current_max_turns = new_turns
+                    else:
+                        log.warning(
+                            "claude -p failed (%s); retrying after %.1fs",
+                            str(exc)[:120],
+                            RETRY_BACKOFF_S,
+                        )
+                    time.sleep(RETRY_BACKOFF_S)
+                    continue
+                raise
+            return _extract_json(wrapper, schema=schema)
+        # unreachable — loop either returns or raises
+        raise RuntimeError(f"unreachable: last_err={last_err!r}")
+
+    def _build_cmd(
+        self,
+        system: list[SystemBlock],
+        user: str,
+        schema: dict[str, Any] | None,
+        tools: str,
+        add_dirs: list[str] | None,
+        max_turns: int | None,
+        system_mode: str,
+    ) -> list[str]:
         system_text = "\n\n".join(b.text for b in system)
         system_flag = "--system-prompt" if system_mode == "override" else "--append-system-prompt"
         cmd: list[str] = [
@@ -106,37 +184,66 @@ class ClaudeHeadlessClient:
             cmd.extend(["--max-turns", str(max_turns)])
         for d in add_dirs or []:
             cmd.extend(["--add-dir", d])
+        return cmd
 
+    def _invoke(self, cmd: list[str], timeout: float) -> dict[str, Any]:
+        """Run claude -p once; raise RuntimeError on non-zero exit, propagate
+        TimeoutExpired. Returns the parsed wrapper JSON on success."""
         proc = subprocess.run(
             cmd,
             input="",  # explicit empty stdin so claude doesn't wait
             capture_output=True,
             text=True,
-            timeout=self.timeout_s,
+            timeout=timeout,
             env={**os.environ},
         )
         if proc.returncode != 0:
-            raise RuntimeError(
-                f"claude -p exited {proc.returncode}: stderr={proc.stderr.strip()}"
-            )
+            raise RuntimeError(_format_exit_error(proc))
 
         try:
             wrapper = json.loads(proc.stdout)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"claude -p emitted non-JSON wrapper: {proc.stdout!r}") from exc
+            raise RuntimeError(
+                f"claude -p emitted non-JSON wrapper (returncode 0): {proc.stdout[:400]!r}"
+            ) from exc
 
         if wrapper.get("is_error"):
             raise RuntimeError(
                 f"claude -p reported error: {wrapper.get('result') or wrapper.get('subtype')}"
             )
+        return wrapper
 
-        # When --json-schema is set, the parsed object is in `structured_output`.
-        if schema is not None and "structured_output" in wrapper:
-            return wrapper["structured_output"]
 
-        # Otherwise, parse the result text leniently (handles fences and prose).
-        result = wrapper.get("result") or ""
-        return _parse_json_lenient(result)
+def _format_exit_error(proc: subprocess.CompletedProcess) -> str:
+    """Build a useful error string from a non-zero exit. The wrapper JSON in
+    stdout often carries the real diagnostic; surface it when present."""
+    msg = f"claude -p exited {proc.returncode}"
+    diag = (proc.stderr or "").strip()
+    # On non-zero exit, claude still often emits the wrapper JSON to stdout
+    # with `is_error: true` and a `result` field describing the failure.
+    if proc.stdout:
+        try:
+            wrapper = json.loads(proc.stdout)
+            inner = wrapper.get("result") or wrapper.get("subtype") or ""
+            if inner:
+                diag = f"{diag} | wrapper={inner}".strip(" |")
+        except json.JSONDecodeError:
+            head = proc.stdout.strip()[:300]
+            if head:
+                diag = f"{diag} | stdout={head}".strip(" |")
+    return f"{msg}: {diag}" if diag else msg
+
+
+def _extract_json(wrapper: dict[str, Any], schema: dict[str, Any] | None) -> dict[str, Any]:
+    """Pull the actual JSON payload from the claude -p wrapper.
+
+    With --json-schema, the parsed object lands in `structured_output`. Without,
+    we lenient-parse the `result` text (which may have prose or code fences).
+    """
+    if schema is not None and "structured_output" in wrapper:
+        return wrapper["structured_output"]
+    result = wrapper.get("result") or ""
+    return _parse_json_lenient(result)
 
 
 def _parse_json_lenient(text: str) -> dict[str, Any]:

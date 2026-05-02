@@ -140,6 +140,126 @@ def test_worker_emits_summary_with_examples_run():
     assert summary[0].examples_run >= 1
 
 
+def test_worker_summary_carries_exception_histogram():
+    """A target that raises on every input should report it in the summary —
+    that's the diagnostic for "0 witnesses" runs. eval_expression('foo') with
+    a payload like 'not_a_real_var' raises NameError; payloads that are valid
+    expressions complete without exception."""
+    marker = _make_marker()
+    spec = HarnessSpec(
+        target_module="vulnpkg.api",
+        target_qualname="eval_expression",
+        marker=marker,
+        max_examples=5,
+        # Each seed is invalid Python that eval() will raise on.
+        strategy=StrategySpec(
+            kind="text",
+            seeds=["((( {MARKER}", "??? {MARKER}", "@@@ {MARKER}", "###{MARKER}"],
+        ),
+    )
+    results, stderr = _run_worker(spec)
+    summary = next((r for r in results if r.kind == "summary"), None)
+    assert summary is not None, f"no summary; stderr={stderr}"
+    # SyntaxError is what `eval` raises for these inputs.
+    assert sum(summary.exception_histogram.values()) > 0, (
+        f"expected exceptions tallied; got {summary.exception_histogram}"
+    )
+    assert "SyntaxError" in summary.exception_histogram, summary.exception_histogram
+
+
+def test_worker_resolves_method_via_auto_instantiate(tmp_path):
+    """A harness target like Class.method should be auto-bound to an instance
+    instead of being called as an unbound function (which would pass the
+    payload as `self`)."""
+    pkg_dir = tmp_path / "auto_inst_pkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("")
+    (pkg_dir / "mod.py").write_text(
+        "class Container:\n"
+        "    def __init__(self):\n"
+        "        self.tag = 'inst'\n"
+        "    def consume(self, x):\n"
+        "        eval(x)  # exercises code_exec audit hook\n"
+    )
+    marker = _make_marker()
+    spec = HarnessSpec(
+        target_module="auto_inst_pkg.mod",
+        target_qualname="Container.consume",
+        marker=marker,
+        max_examples=5,
+        strategy=StrategySpec(kind="text", seeds=["'{MARKER}'"]),
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{SRC}{os.pathsep}{tmp_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    proc = subprocess.run(
+        [sys.executable, "-m", "arbiter.worker"],
+        input=spec.model_dump_json() + "\n",
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    results: list[WorkerResult] = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                results.append(WorkerResult.model_validate(json.loads(line)))
+            except Exception:
+                continue
+    summary = next((r for r in results if r.kind == "summary"), None)
+    assert summary is not None, f"no summary; stderr={proc.stderr}"
+    # If auto-instantiation worked, examples ran without TypeError on every call.
+    # If it didn't, every example would fail with TypeError 'str' object has no attribute …
+    type_errors = summary.exception_histogram.get("TypeError", 0)
+    assert type_errors == 0, (
+        f"unbound method call leaked TypeError on every example: {summary.exception_histogram}"
+    )
+    # And we should have at least one tainted witness from eval('marker').
+    tainted = [
+        r for r in results if r.kind == "witness" and r.witness and r.witness.event.tainted
+    ]
+    assert tainted, f"no tainted witnesses; stderr={proc.stderr}\nresults={results}"
+
+
+def test_worker_falls_back_when_class_constructor_needs_args(tmp_path):
+    """If `Class()` raises (constructor needs args), the worker now falls
+    back to `Class.__new__` and ultimately MagicMock(spec=Class) so the
+    method body still runs. The audit-hook oracle should fire on a sink
+    call inside the method body, producing a tainted witness."""
+    pkg_dir = tmp_path / "needsargs_pkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text("")
+    (pkg_dir / "mod.py").write_text(
+        "class NeedsArg:\n"
+        "    def __init__(self, required):\n"
+        "        self.x = required\n"
+        "    def consume(self, x):\n"
+        "        eval(x)\n"
+    )
+    marker = _make_marker()
+    spec = HarnessSpec(
+        target_module="needsargs_pkg.mod",
+        target_qualname="NeedsArg.consume",
+        marker=marker,
+        max_examples=5,
+        strategy=StrategySpec(kind="text", seeds=["'{MARKER}'"]),
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{SRC}{os.pathsep}{tmp_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    proc = subprocess.run(
+        [sys.executable, "-m", "arbiter.worker"],
+        input=spec.model_dump_json() + "\n",
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert proc.returncode == 0, f"stderr={proc.stderr}\nstdout={proc.stdout[:500]}"
+    tainted_witness = '"tainted":true' not in proc.stdout  # ensure we don't get false negative on quoting
+    assert "witness" in proc.stdout, f"expected at least one witness; got {proc.stdout[:500]}"
+
+
 def test_worker_rejects_bad_spec():
     proc = subprocess.run(
         [sys.executable, "-m", "arbiter.worker"],

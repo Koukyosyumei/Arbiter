@@ -10,7 +10,7 @@ guide (cached, keyed on family). The user message is the only per-call cost.
 from __future__ import annotations
 
 from arbiter.llm.sdk import ClaudeHeadlessClient, LLMClient, SystemBlock
-from arbiter.models import Flow, Sink, SinkFamily, StrategySpec, Target
+from arbiter.models import AttackerModel, Flow, Sink, SinkFamily, StrategySpec, Target
 from arbiter.payloads import get_seed_corpus
 
 MARKER_PLACEHOLDER = "{MARKER}"
@@ -157,6 +157,53 @@ Traversal sequences with the marker in the resolved path:
 }
 
 
+# Per-attacker-model nudges. Most paths are `network` (the default), so we only
+# include a guide when the attacker model meaningfully changes the seed shape.
+ATTACKER_MODEL_GUIDE: dict[AttackerModel, str] = {
+    AttackerModel.loaded_file_content: """\
+# Attacker model: loaded_file_content
+
+The dangerous bytes live inside a *file* the entry opens. The fuzzer feeds
+your seeds directly to the harness leaf — the leaf must be one that takes
+the file's content (bytes/str), not a filename. Seeds should be valid
+fragments of whatever container format the entry parses (XML, YAML, JSON,
+SQLite blob, project archive). The marker rides inside that container in
+whatever field actually flows to the sink — usually a base64/hex blob, an
+attribute, or a script element. Plain marker substitution into a sink-shaped
+payload (e.g. raw pickle bytes) won't trigger if the entry's parser unwraps
+a layer first.
+""",
+    AttackerModel.argv: """\
+# Attacker model: argv
+
+Bytes are a CLI argument. Quote-escaping and shell metachars matter only if
+the chain passes argv into a shell. Otherwise, treat the input as ordinary
+text — but remember argv values are normally short, so very long seeds may
+exercise paths the entry never sees in practice.
+""",
+    AttackerModel.env: """\
+# Attacker model: env
+
+Bytes come from an environment variable. Like argv, but typically passed
+through `os.environ` lookups. Marker substitution is straightforward.
+""",
+    AttackerModel.prompt_injected: """\
+# Attacker model: prompt_injected
+
+Bytes are an LLM tool-use response the attacker influenced upstream. Format
+the seeds as plausible LLM outputs (text, optionally JSON-shaped) so the
+downstream parser accepts them.
+""",
+}
+
+
+def _resolve_attacker_model(target: Target, flow: Flow | None) -> AttackerModel:
+    """Per-flow override wins; otherwise inherit the target's effective model."""
+    if flow is not None and flow.attacker_model is not None:
+        return flow.attacker_model
+    return target.effective_attacker_model
+
+
 def build_user_prompt(target: Target, sink: Sink, flow: Flow | None = None) -> str:
     intermediate = "(direct call)"
     rationale = "(none)"
@@ -165,6 +212,7 @@ def build_user_prompt(target: Target, sink: Sink, flow: Flow | None = None) -> s
             intermediate = " -> ".join(flow.intermediate)
         if flow.rationale:
             rationale = flow.rationale
+    attacker_model = _resolve_attacker_model(target, flow)
 
     return f"""\
 Target: {target.module}:{target.qualname}
@@ -179,6 +227,7 @@ Sink: {sink.callable_qualname}
   note: {sink.note or "(none)"}
 
 Flow:
+  attacker_model: {attacker_model.value}
   intermediate: {intermediate}
   rationale: {rationale}
 
@@ -186,11 +235,16 @@ Generate 4-8 seed payloads as JSON in the schema above.
 """
 
 
-def build_system_blocks(sink: Sink) -> list[SystemBlock]:
-    return [
+def build_system_blocks(sink: Sink, attacker_model: AttackerModel | None = None) -> list[SystemBlock]:
+    blocks = [
         SystemBlock(text=SYSTEM_BASE, cache=True),
         SystemBlock(text=SINK_FAMILY_GUIDE[sink.family], cache=True),
     ]
+    if attacker_model is not None:
+        guide = ATTACKER_MODEL_GUIDE.get(attacker_model)
+        if guide is not None:
+            blocks.append(SystemBlock(text=guide, cache=True))
+    return blocks
 
 
 def _coerce_strategy(raw: dict, sink: Sink) -> StrategySpec:
@@ -223,7 +277,8 @@ def synthesize_strategy(
     can decide to retry or escalate to a stronger model.
     """
     client = llm or ClaudeHeadlessClient()
-    system = build_system_blocks(sink)
+    attacker_model = _resolve_attacker_model(target, flow)
+    system = build_system_blocks(sink, attacker_model=attacker_model)
     user = build_user_prompt(target, sink, flow)
     raw = client.complete_json(
         system=system, user=user, max_tokens=max_tokens, schema=STRATEGY_SCHEMA

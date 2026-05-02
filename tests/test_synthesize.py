@@ -10,13 +10,14 @@ import pytest
 
 from arbiter.llm.sdk import SystemBlock, _parse_json_lenient
 from arbiter.llm.synthesize import (
+    ATTACKER_MODEL_GUIDE,
     SINK_FAMILY_GUIDE,
     SYSTEM_BASE,
     build_system_blocks,
     build_user_prompt,
     synthesize_strategy,
 )
-from arbiter.models import Exposure, Sink, SinkFamily, StrategySpec, Target
+from arbiter.models import AttackerModel, Exposure, Flow, Sink, SinkFamily, StrategySpec, Target
 
 
 def _eval_sink() -> Sink:
@@ -202,3 +203,60 @@ def test_parse_json_lenient_raises_when_no_object():
 def test_parse_json_lenient_raises_when_unterminated():
     with pytest.raises(ValueError):
         _parse_json_lenient('{"a": 1, "b": ')
+
+
+# --- attacker_model wiring ---
+
+
+def test_build_user_prompt_displays_default_attacker_model():
+    user = build_user_prompt(_eval_target(), _eval_sink())
+    # Default for Exposure.library is `network`.
+    assert "attacker_model: network" in user
+
+
+def test_build_user_prompt_uses_per_flow_override():
+    flow = Flow(
+        target_fqn="vulnpkg.api:eval_expression",
+        sink=_eval_sink(),
+        attacker_model=AttackerModel.loaded_file_content,
+    )
+    user = build_user_prompt(_eval_target(), _eval_sink(), flow)
+    assert "attacker_model: loaded_file_content" in user
+
+
+def test_build_system_blocks_appends_attacker_model_guide():
+    blocks = build_system_blocks(
+        _eval_sink(), attacker_model=AttackerModel.loaded_file_content
+    )
+    assert len(blocks) == 3
+    assert blocks[2].text == ATTACKER_MODEL_GUIDE[AttackerModel.loaded_file_content]
+
+
+def test_build_system_blocks_omits_guide_for_default_network():
+    """No guide is registered for `network` (the default), so we don't
+    bloat the cached system prompt for the common case."""
+    blocks = build_system_blocks(_eval_sink(), attacker_model=AttackerModel.network)
+    assert len(blocks) == 2  # no third block
+
+
+def test_synthesize_strategy_passes_loaded_file_content_guide_through(monkeypatch):
+    captured: dict = {}
+
+    class _Cap(_FakeLLM):
+        def complete_json(self, system, user, max_tokens=2048, schema=None):
+            captured["system"] = system
+            captured["user"] = user
+            return self.response
+
+    fake = _Cap({"kind": "text", "seeds": ["{MARKER}"]})
+    target = Target(
+        module="p.m",
+        qualname="open_file",
+        signature="(path: str)",
+        exposure=Exposure.network,
+        attacker_model=AttackerModel.loaded_file_content,
+    )
+    synthesize_strategy(target, _eval_sink(), llm=fake)
+    system_text = "\n\n".join(b.text for b in captured["system"])
+    assert "loaded_file_content" in system_text
+    assert "loaded_file_content" in captured["user"]

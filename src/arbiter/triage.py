@@ -1,7 +1,8 @@
 """Triage — rank witnesses so the top of the report is what a developer
 should actually act on.
 
-    score = severity × exposure × directness × novelty × (1 − intent_penalty)
+    score = severity × exposure × directness × novelty × attacker_model
+            × (1 − intent_penalty)
 
 - severity        : sink-family tier (critical=1.0, high=0.7, medium=0.5)
 - exposure        : how the entry point is reachable (network=1.0 .. internal=0.3)
@@ -9,6 +10,10 @@ should actually act on.
 - novelty         : 1.0 for the first witness with a given fingerprint within
                     a campaign, 0.5 / 0.3 / ... for repeats. Cross-campaign
                     novelty is a v0.5 concern.
+- attacker_model  : where the bytes come from. network=1.0 (direct);
+                    loaded_file_content=0.6 (needs social engineering);
+                    env=0.5; argv=0.85; prompt_injected=0.7. See
+                    AttackerModel for the full taxonomy.
 - intent_penalty  : 0.0–0.5 heuristic penalty when the target's docstring
                     advertises the dangerous behavior (sink "is the feature").
                     Multiplicative so even fully-intended sinks still report
@@ -24,6 +29,7 @@ from __future__ import annotations
 from collections import Counter
 
 from arbiter.models import (
+    AttackerModel,
     Exposure,
     Flow,
     ScoreBreakdown,
@@ -46,6 +52,20 @@ EXPOSURE_SCORE: dict[Exposure, float] = {
     Exposure.cli: 0.8,
     Exposure.library: 0.6,
     Exposure.internal: 0.3,
+}
+
+# Multiplier for the attacker model. Higher = more directly weaponizable from
+# the attacker's perspective. `loaded_file_content` requires social engineering
+# (the user has to open the malicious file); `env` requires having already
+# influenced the process environment; `prompt_injected` requires a tool-use
+# chain. These don't change exploitability — only the urgency — so the
+# multipliers are gentle.
+ATTACKER_MODEL_SCORE: dict[AttackerModel, float] = {
+    AttackerModel.network: 1.0,
+    AttackerModel.argv: 0.85,
+    AttackerModel.loaded_file_content: 0.6,
+    AttackerModel.env: 0.5,
+    AttackerModel.prompt_injected: 0.7,
 }
 
 # Keywords that indicate a docstring is *advertising* the dangerous behavior.
@@ -82,6 +102,15 @@ def _exposure_score(target: Target | None) -> float:
     if target is None:
         return EXPOSURE_SCORE[Exposure.library]  # default mid-band when unknown
     return EXPOSURE_SCORE.get(target.exposure, EXPOSURE_SCORE[Exposure.library])
+
+
+def _attacker_model_score(flow: Flow | None, target: Target | None) -> float:
+    """Per-flow override wins over target's model; both unknown → network default."""
+    if flow is not None and flow.attacker_model is not None:
+        return ATTACKER_MODEL_SCORE.get(flow.attacker_model, 1.0)
+    if target is not None:
+        return ATTACKER_MODEL_SCORE.get(target.effective_attacker_model, 1.0)
+    return 1.0
 
 
 def _directness_score(flow: Flow | None) -> float:
@@ -140,7 +169,8 @@ def score_witness(
     exposure = _exposure_score(target)
     directness = _directness_score(flow)
     novelty = _novelty_score(fingerprint_rank)
-    raw = severity * exposure * directness * novelty
+    attacker_model_mult = _attacker_model_score(flow, target)
+    raw = severity * exposure * directness * novelty * attacker_model_mult
 
     if sink_obj is not None:
         penalty, reason = _intent_penalty(target, sink_obj)
@@ -154,6 +184,7 @@ def score_witness(
         exposure=exposure,
         directness=directness,
         novelty=novelty,
+        attacker_model=attacker_model_mult,
         intent_penalty=penalty,
         raw=raw,
         final=final,

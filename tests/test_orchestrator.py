@@ -240,6 +240,247 @@ def test_run_campaign_merges_static_corpus_with_llm_seeds(monkeypatch):
     assert len(merged) <= orch.MAX_SEEDS_PER_STRATEGY
 
 
+def test_run_campaign_uses_harness_target_when_flow_specifies_one(monkeypatch):
+    """When a flow carries harness_module/harness_qualname, the worker should
+    fuzz the leaf — not the entry."""
+    target = Target(
+        module="vulnpkg.api",
+        qualname="eval_expression",
+        signature="(expr: str) -> Any",
+        exposure=Exposure.library,
+    )
+    sink = _eval_sink()
+    # Flow's harness target is a *different* fuzzable function in vulnpkg —
+    # we'll point it at echo_safe so we can verify routing without needing
+    # eval_expression to be the actual call.
+    flow = Flow(
+        target_fqn=target.fqn,
+        sink=sink,
+        confidence=0.95,
+        harness_module="vulnpkg.api",
+        harness_qualname="echo_safe",
+    )
+    captured: list = []
+
+    def fake_synth(t, s, flow=None, **kw):
+        return _eval_strategy()
+
+    def fake_run_worker(spec, timeout_s, pythonpath_extra=None):
+        captured.append(spec)
+        # Return an empty result so the campaign completes cleanly.
+        return []
+
+    monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: [target])
+    monkeypatch.setattr(orch, "analyze_reachability", lambda *a, **kw: [flow])
+    monkeypatch.setattr(orch, "synthesize_strategy", fake_synth)
+    monkeypatch.setattr(orch, "_run_worker", fake_run_worker)
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        parallelism=1,
+    )
+    orch.run_campaign(config, llm=object())
+
+    assert len(captured) == 1
+    spec = captured[0]
+    assert spec.target_module == "vulnpkg.api"
+    assert spec.target_qualname == "echo_safe", (
+        f"expected harness_qualname to override entry; got {spec.target_qualname}"
+    )
+
+
+def test_run_campaign_falls_back_to_entry_when_no_harness(monkeypatch):
+    """Default case — no harness on the flow, worker fuzzes the entry."""
+    target = _eval_target()
+    sink = _eval_sink()
+    flow = Flow(target_fqn=target.fqn, sink=sink, confidence=0.95)  # no harness
+    captured: list = []
+
+    monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: [target])
+    monkeypatch.setattr(orch, "analyze_reachability", lambda *a, **kw: [flow])
+    monkeypatch.setattr(orch, "synthesize_strategy", lambda *a, **kw: _eval_strategy())
+    monkeypatch.setattr(
+        orch,
+        "_run_worker",
+        lambda spec, t, pythonpath_extra=None: captured.append(spec) or [],
+    )
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        parallelism=1,
+    )
+    orch.run_campaign(config, llm=object())
+
+    assert captured[0].target_module == target.module
+    assert captured[0].target_qualname == target.qualname
+
+
+def test_run_campaign_caps_targets_by_exposure_tier(monkeypatch):
+    """When discover returns more targets than max_targets, the orchestrator
+    drops the lowest-exposure tier first."""
+    targets = [
+        Target(module="m", qualname=f"net_{i}", signature="()", exposure=Exposure.network)
+        for i in range(2)
+    ] + [
+        Target(module="m", qualname=f"cli_{i}", signature="()", exposure=Exposure.cli)
+        for i in range(2)
+    ] + [
+        Target(module="m", qualname=f"int_{i}", signature="()", exposure=Exposure.internal)
+        for i in range(5)
+    ]
+    monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: list(targets))
+    monkeypatch.setattr(orch, "analyze_reachability", lambda *a, **kw: [])
+    monkeypatch.setattr(
+        orch, "synthesize_strategy", lambda *a, **kw: pytest.fail("unreached")
+    )
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        max_targets=4,  # keep all network + cli, drop internals
+    )
+    result = orch.run_campaign(config, llm=object())
+    assert len(result.targets) == 4
+    exposures = [t.exposure for t in result.targets]
+    # Network must come first (highest priority)
+    assert exposures.count(Exposure.network) == 2
+    assert exposures.count(Exposure.cli) == 2
+    assert Exposure.internal not in exposures
+
+
+def test_run_campaign_does_not_cap_when_under_limit(monkeypatch):
+    target = _eval_target()
+    monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: [target])
+    monkeypatch.setattr(orch, "analyze_reachability", lambda *a, **kw: [])
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        max_targets=12,
+    )
+    result = orch.run_campaign(config, llm=object())
+    assert result.targets == [target]
+
+
+def test_flow_key_distinguishes_sink_locations():
+    """Two flows with the same target+sink_qualname but different file:line
+    must produce distinct keys. Without this, the strategies dict silently
+    overwrites earlier entries."""
+    target_fqn = "pkg.api:entry"
+    sink_a = Sink(
+        family=SinkFamily.deserialization,
+        callable_qualname="pickle.loads",
+        file="pkg/a.py",
+        line=10,
+    )
+    sink_b = Sink(
+        family=SinkFamily.deserialization,
+        callable_qualname="pickle.loads",
+        file="pkg/a.py",
+        line=99,
+    )
+    sink_c = Sink(
+        family=SinkFamily.deserialization,
+        callable_qualname="pickle.loads",
+        file="pkg/b.py",
+        line=10,
+    )
+    keys = {
+        orch._flow_key(Flow(target_fqn=target_fqn, sink=s, confidence=0.9))
+        for s in (sink_a, sink_b, sink_c)
+    }
+    assert len(keys) == 3, f"expected 3 distinct keys, got {keys}"
+
+
+def test_run_campaign_distinct_sink_locations_get_distinct_strategies(monkeypatch):
+    """End-to-end: two flows hitting the same sink callable at different
+    locations must each get their own synthesized strategy entry."""
+    target = _eval_target()
+    sink_a = Sink(
+        family=SinkFamily.deserialization,
+        callable_qualname="pickle.loads",
+        file=str(VULNPKG_PATH / "api.py"),
+        line=10,
+    )
+    sink_b = Sink(
+        family=SinkFamily.deserialization,
+        callable_qualname="pickle.loads",
+        file=str(VULNPKG_PATH / "api.py"),
+        line=42,
+    )
+    flow_a = Flow(target_fqn=target.fqn, sink=sink_a, confidence=0.9)
+    flow_b = Flow(target_fqn=target.fqn, sink=sink_b, confidence=0.9)
+    synth_calls: list[Flow] = []
+
+    def fake_synth(t, s, flow=None, **kw):
+        synth_calls.append(flow)
+        return _eval_strategy()
+
+    monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: [target])
+    monkeypatch.setattr(orch, "analyze_reachability", lambda *a, **kw: [flow_a, flow_b])
+    monkeypatch.setattr(orch, "synthesize_strategy", fake_synth)
+    monkeypatch.setattr(
+        orch,
+        "_run_worker",
+        lambda spec, t, pythonpath_extra=None: [],
+    )
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        parallelism=1,
+    )
+    result = orch.run_campaign(config, llm=object())
+
+    assert len(synth_calls) == 2, "synthesize_strategy must be called per distinct sink site"
+    assert len(result.strategies) == 2, (
+        f"expected 2 strategy entries, got {list(result.strategies)}"
+    )
+
+
+def test_run_campaign_logs_worker_summary_with_histogram(monkeypatch, caplog):
+    """When workers report a summary, the orchestrator must surface
+    examples_run + exception histogram so '0 witnesses' runs are diagnosable."""
+    import logging
+
+    from arbiter.models import WorkerResult
+
+    target = _eval_target()
+    sink = _eval_sink()
+    flow = Flow(target_fqn=target.fqn, sink=sink, confidence=0.9)
+
+    monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: [target])
+    monkeypatch.setattr(orch, "analyze_reachability", lambda *a, **kw: [flow])
+    monkeypatch.setattr(orch, "synthesize_strategy", lambda *a, **kw: _eval_strategy())
+    monkeypatch.setattr(
+        orch,
+        "_run_worker",
+        lambda spec, t, pythonpath_extra=None: [
+            WorkerResult(
+                kind="summary",
+                examples_run=42,
+                exception_histogram={"TypeError": 41, "ValueError": 1},
+            )
+        ],
+    )
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        parallelism=1,
+    )
+    with caplog.at_level(logging.WARNING, logger="arbiter.orchestrator"):
+        orch.run_campaign(config, llm=object())
+
+    matching = [r for r in caplog.records if "ran 42 examples" in r.getMessage()]
+    assert matching, f"no summary log found; records={[r.getMessage() for r in caplog.records]}"
+    # Most-frequent exception comes first.
+    assert "TypeError" in matching[0].getMessage()
+    assert "ValueError" in matching[0].getMessage()
+
+
 def test_run_campaign_caps_merged_seeds(monkeypatch):
     """If LLM returns many seeds, the cap still holds."""
     target = _eval_target()

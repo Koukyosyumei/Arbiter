@@ -75,6 +75,13 @@ def scan(
     parallelism: Annotated[
         int, typer.Option("--parallelism", "-j", help="Concurrent worker subprocesses.")
     ] = 4,
+    max_targets: Annotated[
+        int,
+        typer.Option(
+            "--max-targets",
+            help="Cap reachability/synthesize work to top-K targets by exposure tier.",
+        ),
+    ] = 12,
     worker_timeout: Annotated[
         float, typer.Option("--worker-timeout", help="Per-worker wall-clock seconds.")
     ] = 60.0,
@@ -109,6 +116,7 @@ def scan(
         flow_confidence_threshold=confidence_threshold,
         worker_timeout_s=worker_timeout,
         parallelism=parallelism,
+        max_targets=max_targets,
     )
 
     typer.echo(f"scanning {config.package_path} as {config.package_name!r}", err=True)

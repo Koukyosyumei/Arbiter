@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 
 from arbiter.llm.sdk import ClaudeHeadlessClient, LLMClient, SystemBlock
-from arbiter.models import Exposure, Target
+from arbiter.models import AttackerModel, Exposure, Target
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +37,16 @@ DISCOVER_SCHEMA: dict = {
                     "exposure": {
                         "type": "string",
                         "enum": ["network", "cli", "library", "internal"],
+                    },
+                    "attacker_model": {
+                        "type": "string",
+                        "enum": [
+                            "network",
+                            "argv",
+                            "loaded_file_content",
+                            "env",
+                            "prompt_injected",
+                        ],
                     },
                     "rationale": {"type": "string"},
                 },
@@ -65,6 +75,15 @@ plausibly invoke with attacker-controlled bytes.
 - Deserialization endpoints (anything that accepts bytes/strings and parses
   them: `from_bytes`, `loads`, `parse`, `decode`).
 - Public methods on classes that appear in `__all__` or in re-exports.
+- Functions registered through a decorator-based command/plugin system
+  (`@click.command`, `@app.command`, `@cli.command`, `@route`,
+  `@<module>.command(...)`, `@register`, `@plugin.register`, etc.). These
+  are user-triggerable from menus, keybindings, slash commands, REPL
+  shortcuts, or HTTP routes — treat them as `cli` exposure with attacker
+  bytes from the loaded document/session (`loaded_file_content`) unless
+  the docstring or signature obviously says otherwise. Editor/IDE projects
+  use this pattern heavily; missing them means missing the bulk of the
+  attack surface.
 
 # What does NOT count
 
@@ -78,6 +97,28 @@ plausibly invoke with attacker-controlled bytes.
 - `cli` — invoked from a shell command line (argv).
 - `library` — imported by downstream Python code; attacker can pass arguments.
 - `internal` — package-private; only here if it's still callable from outside.
+
+# Attacker model
+
+`exposure` says who *invokes* the entry point. `attacker_model` says where the
+*dangerous bytes* originate — the attacker may not be the caller. Pick the
+attacker model that best describes the most likely exploitation path:
+
+- `network` — bytes arrive over a socket (HTTP body, RPC payload, WS frame).
+- `argv` — bytes are an argument on the shell command line.
+- `loaded_file_content` — the entry takes a *path or handle*, but the
+  dangerous bytes live inside the file's *content*. Common for "open file",
+  "import project", "load config" entries — the path itself is uninteresting,
+  the parser of the contents is the real attack surface.
+- `env` — bytes come from an environment variable.
+- `prompt_injected` — bytes are produced by a downstream LLM whose prompt
+  the attacker influences (tool-use chains).
+
+The field is optional. Omit it when an entry takes scalar arguments fuzzed
+directly (the default attacker model derived from `exposure` will apply).
+Set it explicitly when the entry's signature has a path/handle parameter
+that the function will read and parse — for those, `loaded_file_content` is
+almost always more accurate than the inherited default.
 
 # Method
 
@@ -118,12 +159,21 @@ def _coerce_target(raw: dict) -> Target | None:
             exposure = Exposure(exposure_str)
         except ValueError:
             exposure = Exposure.library
+        attacker_model: AttackerModel | None = None
+        am_str = raw.get("attacker_model")
+        if am_str is not None:
+            try:
+                attacker_model = AttackerModel(am_str)
+            except ValueError:
+                # Unknown value — leave None and let Target derive from exposure.
+                attacker_model = None
         return Target(
             module=str(raw["module"]),
             qualname=str(raw["qualname"]),
             signature=str(raw.get("signature", "(...)")),
             docstring=raw.get("docstring") or None,
             exposure=exposure,
+            attacker_model=attacker_model,
         )
     except (KeyError, TypeError, ValueError) as exc:
         log.warning("dropping malformed target %r: %s", raw, exc)

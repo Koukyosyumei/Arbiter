@@ -204,6 +204,160 @@ def scan_file(path: Path) -> list[Sink]:
     return found
 
 
+def _funcdef_param_names(funcdef: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+    """Return the funcdef's positional/keyword parameter names, dropping
+    `self`/`cls` so wrapper detection doesn't fire on no-arg methods."""
+    params: list[str] = []
+    for a in (*funcdef.args.posonlyargs, *funcdef.args.args, *funcdef.args.kwonlyargs):
+        if a.arg in ("self", "cls"):
+            continue
+        params.append(a.arg)
+    return params
+
+
+def _wraps_a_sink(
+    funcdef: ast.FunctionDef | ast.AsyncFunctionDef,
+    aliases: dict[str, str],
+) -> tuple[str, SinkFamily, int] | None:
+    """Heuristic: True if `funcdef` calls a known process-family sink with a
+    Name argument and has at least one non-self parameter. The first matching
+    sink is returned (qualname, family, line).
+
+    Pattern caught:
+        def helper(arg):           subprocess.Popen(arg, shell=True)
+        def helper(arg):           for x in arg: subprocess.Popen(x, ...)
+        def helper(arg, kind):     os.system(arg)
+    Pattern NOT caught:
+        def helper():              os.system("clear")            (no params)
+        def helper(arg):           subprocess.Popen(["ls"])      (literal first arg)
+
+    Coarse on purpose — false positives are call sites that look like
+    wrappers but pass hardcoded data. Those still resolve back to a sink
+    that's already in the inventory at its original site, so they cost only
+    duplicate flow entries, not missed bugs.
+    """
+    if not _funcdef_param_names(funcdef):
+        return None
+    for node in ast.walk(funcdef):
+        if not isinstance(node, ast.Call):
+            continue
+        qual = _resolve_call(node, aliases)
+        if qual is None or qual not in SINK_REGISTRY:
+            continue
+        family, _ = SINK_REGISTRY[qual]
+        if family is not SinkFamily.process:
+            continue
+        if not node.args:
+            continue
+        first = node.args[0]
+        if isinstance(first, ast.Name):
+            return qual, family, node.lineno
+        # f-string carrying a Name interpolation (run_asciidoctor's pattern):
+        # `command = f"asciidoctor {i_path} -o {o_path} -b html5"`
+        # then `subprocess.Popen(command, shell=True)`.
+        if isinstance(first, ast.JoinedStr):
+            for v in first.values:
+                if isinstance(v, ast.FormattedValue) and isinstance(v.value, ast.Name):
+                    return qual, family, node.lineno
+    return None
+
+
+def _find_wrappers_in_file(
+    file: Path, package_path: Path, package_name: str
+) -> dict[str, tuple[SinkFamily, Path, int, str]]:
+    """Find wrapper functions in one file. Returns map of fully-qualified
+    wrapper names to (family, file, line, wrapped_sink_qualname).
+
+    The qualname uses the file's importable module path so callers' alias
+    resolution finds the same key. Methods on classes get `Class.method`
+    qualname components.
+    """
+    from arbiter.imports import file_to_module
+
+    module = file_to_module(file, package_path, package_name)
+    if module is None:
+        return {}
+    try:
+        source = file.read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source, filename=str(file))
+    except (SyntaxError, UnicodeDecodeError, OSError):
+        return {}
+
+    tracker = _ImportTracker()
+    tracker.visit(tree)
+    aliases = tracker.aliases
+
+    out: dict[str, tuple[SinkFamily, Path, int, str]] = {}
+
+    def visit(node: ast.AST, qual_prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                visit(child, f"{qual_prefix}{child.name}.")
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                hit = _wraps_a_sink(child, aliases)
+                if hit is not None:
+                    sink_qual, family, _ = hit
+                    full_qual = f"{module}.{qual_prefix}{child.name}"
+                    out[full_qual] = (family, file, child.lineno, sink_qual)
+                # nested defs are unusual; don't recurse — top-level + class
+                # methods cover ~all wrappers in real code.
+
+    visit(tree, "")
+    return out
+
+
+def find_wrapper_sinks(
+    root: Path, package_path: Path, package_name: str
+) -> dict[str, tuple[SinkFamily, Path, int, str]]:
+    """Scan the tree for in-package wrapper functions. Returns a map of
+    importable wrapper qualname → (family, definition_file, definition_line,
+    underlying_sink_qualname). Empty if no wrappers found.
+    """
+    wrappers: dict[str, tuple[SinkFamily, Path, int, str]] = {}
+    for f in _iter_python_files(root):
+        wrappers.update(_find_wrappers_in_file(f, package_path, package_name))
+    return wrappers
+
+
+def scan_file_with_registry(
+    path: Path, registry: dict[str, tuple[SinkFamily, str | None]]
+) -> list[Sink]:
+    """Same as `scan_file` but with a caller-supplied sink registry.
+
+    Used to scan for callers of wrapper functions discovered in an earlier
+    pass — those wrappers aren't in the global SINK_REGISTRY but should be
+    treated as sinks in the call-site inventory.
+    """
+    try:
+        source = path.read_text(encoding="utf-8", errors="replace")
+        tree = ast.parse(source, filename=str(path))
+    except (SyntaxError, UnicodeDecodeError, OSError):
+        return []
+
+    tracker = _ImportTracker()
+    tracker.visit(tree)
+    aliases = tracker.aliases
+
+    found: list[Sink] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        qual = _resolve_call(node, aliases)
+        if qual is None or qual not in registry:
+            continue
+        family, note = registry[qual]
+        found.append(
+            Sink(
+                family=family,
+                callable_qualname=qual,
+                file=str(path),
+                line=node.lineno,
+                note=note,
+            )
+        )
+    return found
+
+
 def _iter_python_files(root: Path) -> Iterator[Path]:
     if root.is_file() and root.suffix == ".py":
         yield root
