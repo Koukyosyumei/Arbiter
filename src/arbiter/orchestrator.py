@@ -304,17 +304,23 @@ def run_campaign(
         if target is None:
             continue
         log.info("synthesizing strategy for %s -> %s", flow.target_fqn, flow.sink.callable_qualname)
+        static_seeds = get_seed_corpus(flow.sink.family)
         try:
             strategy = synthesize_strategy(target, flow.sink, flow=flow, llm=client)
         except Exception as exc:
-            msg = f"synthesize_strategy({_flow_key(flow)}) failed: {exc!r}"
+            # Common failure: Claude quota exhausted mid-campaign. The static
+            # seed corpus alone covers most known patterns for each sink
+            # family — a degraded run with no LLM-tailored seeds still fires
+            # witnesses on canonical bugs.
+            msg = f"synthesize_strategy({_flow_key(flow)}) failed (using static corpus): {exc!r}"
             log.warning(msg)
             result.errors.append(msg)
-            continue
+            if not static_seeds:
+                continue
+            strategy = StrategySpec(kind="text", params={}, seeds=list(static_seeds))
         # Merge curated static corpus with LLM-generated seeds. Static seeds
         # come first so they're tried before LLM variations; dict.fromkeys
         # preserves order while deduping; the cap keeps the strategy small.
-        static_seeds = get_seed_corpus(flow.sink.family)
         merged = list(dict.fromkeys([*static_seeds, *strategy.seeds]))[:MAX_SEEDS_PER_STRATEGY]
         strategy = strategy.model_copy(update={"seeds": merged})
         result.strategies[_flow_key(flow)] = strategy
@@ -324,16 +330,27 @@ def run_campaign(
         # rationale already explains how the entry-to-leaf path preserves taint.
         harness_module = flow.harness_module or target.module
         harness_qualname = flow.harness_qualname or target.qualname
-        # For loaded_file_content flows, the worker materializes the payload
-        # to a temp file and passes the path. The package-name → suffix map
-        # picks a hint that real parsers usually accept; fall back to a
-        # generic suffix that lets `open(path)` succeed.
+        leaf_overrides_entry = (
+            flow.harness_module is not None and flow.harness_qualname is not None
+            and (flow.harness_module, flow.harness_qualname)
+            != (target.module, target.qualname)
+        )
+        # For loaded_file_content flows where the harness IS the entry, the
+        # worker materializes the payload to a temp file and passes the path
+        # to the parser. When reachability has descended past the file-loader
+        # to a leaf taking scalar bytes (e.g. `run_asciidoctor(self, i_path,
+        # o_path)`), file materialization is *wrong* — the payload should
+        # arrive at the leaf as the literal string the function will splice
+        # into a shell command, not as a tempfile path.
         effective_attacker = (
             flow.attacker_model
             or target.effective_attacker_model
         )
         file_suffix: str | None = None
-        if effective_attacker == AttackerModel.loaded_file_content:
+        if (
+            effective_attacker == AttackerModel.loaded_file_content
+            and not leaf_overrides_entry
+        ):
             top_pkg = config.package_name.split(".")[0]
             file_suffix = _PACKAGE_FILE_SUFFIX_HINTS.get(top_pkg, _DEFAULT_FILE_SUFFIX)
         harnesses.append(
