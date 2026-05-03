@@ -75,29 +75,6 @@ separate API key required):
 pytest tests/test_synthesize_live.py -v
 ```
 
-## Layout
-
-```
-src/arbiter/
-  models.py           Pydantic IPC contracts (Sink, Flow, Witness, HarnessSpec)
-  sinks.py            AST sink inventory (7 sink families, alias resolution)
-  oracle.py           Audit-hook listener + marker taint + internal-frame filter
-  worker.py           Subprocess entry; Hypothesis-driven harness runner
-  orchestrator.py     Campaign pipeline + worker pool (ThreadPoolExecutor)
-  cli.py              `arbiter scan` typer entry point
-  llm/
-    sdk.py            ClaudeHeadlessClient (`claude -p`) + LLMClient Protocol
-    synthesize.py     Strategy synthesizer: (target, sink) -> StrategySpec
-    discover.py       Target discovery via claude -p agent mode
-    reachability.py   Flow generation via claude -p agent mode
-tests/
-  fixtures/vulnpkg/   Known-vulnerable package (eval / yaml / jinja2)
-  test_sinks.py       test_oracle.py      test_worker.py
-  test_synthesize.py  test_discover.py    test_reachability.py
-  test_orchestrator.py test_cli.py
-  test_*_live.py      (skipped when `claude` CLI is missing)
-```
-
 See [`DESIGN.md`](DESIGN.md) for the architecture, threat model, detection
 mechanism, and roadmap.
 
