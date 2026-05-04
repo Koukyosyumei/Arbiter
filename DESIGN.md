@@ -65,7 +65,7 @@ execute attacker-chosen code. The canonical examples:
 
 ```
        ┌──────────────────────────────────────────────────────────────┐
-       │ Orchestrator (in-progress)                                   │
+       │ Orchestrator                                                 │
        │   discover  ── reachability ── synthesize ── schedule ──┐    │
        └──────────────┬─────────────────┬───────────────────┬────┴────┘
                       │                 │                   │
@@ -95,25 +95,6 @@ execute attacker-chosen code. The canonical examples:
                                 ▼
                        Orchestrator collects ──► triage ──► report
 ```
-
-Components currently implemented are bold; the rest are designed but not
-yet wired:
-
-| Module                  | Role                                      | Status     |
-|-------------------------|-------------------------------------------|------------|
-| **`arbiter.models`**    | IPC contracts (Sink, Flow, Witness, …)    | done       |
-| **`arbiter.sinks`**     | Static AST sink inventory                 | done       |
-| **`arbiter.oracle`**    | Audit-hook listener + marker taint        | done       |
-| **`arbiter.worker`**    | Subprocess harness runner (Hypothesis)    | done       |
-| **`arbiter.llm.sdk`**   | `claude -p` headless client + JSON parser | done       |
-| **`arbiter.llm.synthesize`** | Strategy synthesizer (Haiku via headless) | done   |
-| **`arbiter.llm.discover`**   | Target discovery (agent mode)         | done       |
-| **`arbiter.llm.reachability`**| Flow generator (agent mode)          | done       |
-| **`arbiter.orchestrator`**| Campaign coordinator + worker pool      | done       |
-| **`arbiter.cli`**       | `arbiter scan <pkg>`                      | done       |
-| **`arbiter.triage`**    | Ranking rubric                            | done       |
-| **`arbiter.report`**    | Markdown advisory + standalone PoC        | done       |
-| **`arbiter.payloads`**  | Curated static seed library (PayloadsAllTheThings) | done |
 
 ---
 
