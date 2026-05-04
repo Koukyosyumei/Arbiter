@@ -3,13 +3,6 @@
 LLM-augmented property-based fuzzer for detecting **arbitrary code execution
 (ACE)** primitives in Python packages.
 
-> **Status:** v0.4 (pre-alpha). End-to-end campaign pipeline is wired:
-> static sink scan → LLM target discovery → LLM reachability per target →
-> LLM strategy synthesis (with a curated static seed corpus merged in) →
-> parallel worker subprocesses → witness collection → triage ranking →
-> markdown advisory + standalone PoC scripts per witness.
-> The CLI (`arbiter scan`) drives the whole thing.
-
 Arbiter combines three signals that, individually, miss real-world exploits:
 
 1. **Static sink inventory** — AST scan locates calls to dangerous APIs
