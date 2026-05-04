@@ -21,6 +21,7 @@ from arbiter.models import (
     SinkFamily,
     StrategySpec,
     Target,
+    WorkerResult,
 )
 
 VULNPKG_PATH = Path(__file__).parent / "fixtures" / "vulnpkg"
@@ -506,3 +507,93 @@ def test_run_campaign_caps_merged_seeds(monkeypatch):
     result = orch.run_campaign(config, llm=object())
     merged_strategy = next(iter(result.strategies.values()))
     assert len(merged_strategy.seeds) == orch.MAX_SEEDS_PER_STRATEGY
+
+
+def test_run_campaign_writes_stage_artifacts(monkeypatch, tmp_path: Path):
+    target = _eval_target()
+    sink = _eval_sink()
+    flow = Flow(target_fqn=target.fqn, sink=sink, confidence=0.9)
+    artifact_dir = tmp_path / "artifacts"
+
+    monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: [target])
+    monkeypatch.setattr(orch, "analyze_reachability", lambda *a, **kw: [flow])
+    monkeypatch.setattr(orch, "synthesize_strategy", lambda *a, **kw: _eval_strategy())
+    monkeypatch.setattr(
+        orch,
+        "_run_worker",
+        lambda spec, t, pythonpath_extra=None: [
+            WorkerResult(kind="summary", examples_run=1, exception_histogram={})
+        ],
+    )
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        parallelism=1,
+        artifact_dir=artifact_dir,
+    )
+    result = orch.run_campaign(config, llm=object())
+
+    assert result.targets == [target]
+    for name in [
+        "sinks.json",
+        "targets.json",
+        "flows.json",
+        "strategies.json",
+        "witnesses.json",
+        "scored_witnesses.json",
+        "workers.jsonl",
+        "errors.json",
+    ]:
+        assert (artifact_dir / name).exists(), f"missing {name}"
+
+
+def test_run_campaign_resume_skips_completed_llm_stages(monkeypatch, tmp_path: Path):
+    target = _eval_target()
+    sink = _eval_sink()
+    flow = Flow(target_fqn=target.fqn, sink=sink, confidence=0.9)
+    artifact_dir = tmp_path / "artifacts"
+
+    seed_result = orch.CampaignResult(
+        sinks=[sink],
+        targets=[target],
+        flows=[flow],
+        strategies={orch._flow_key(flow): _eval_strategy()},
+    )
+    orch._write_campaign_artifacts(artifact_dir, seed_result)
+
+    monkeypatch.setattr(
+        orch,
+        "discover_targets",
+        lambda *a, **kw: pytest.fail("discover should be loaded from artifacts"),
+    )
+    monkeypatch.setattr(
+        orch,
+        "analyze_reachability",
+        lambda *a, **kw: pytest.fail("reachability should be loaded from artifacts"),
+    )
+    monkeypatch.setattr(
+        orch,
+        "synthesize_strategy",
+        lambda *a, **kw: pytest.fail("strategy should be loaded from artifacts"),
+    )
+    ran_workers: list[object] = []
+    monkeypatch.setattr(
+        orch,
+        "_run_worker",
+        lambda spec, t, pythonpath_extra=None: ran_workers.append(spec) or [],
+    )
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        parallelism=1,
+        resume_from=artifact_dir,
+    )
+    result = orch.run_campaign(config, llm=object())
+
+    assert result.sinks == [sink]
+    assert result.targets == [target]
+    assert result.flows == [flow]
+    assert list(result.strategies) == [orch._flow_key(flow)]
+    assert len(ran_workers) == 1

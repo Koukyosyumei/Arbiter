@@ -97,6 +97,23 @@ def scan(
             help="Write per-witness markdown advisories + standalone PoC scripts.",
         ),
     ] = None,
+    artifact_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--artifact-dir",
+            help="Write resumable campaign stage artifacts to this directory.",
+        ),
+    ] = None,
+    resume_from: Annotated[
+        Path | None,
+        typer.Option(
+            "--resume-from",
+            help=(
+                "Load campaign stage artifacts from this directory and continue "
+                "from missing stages."
+            ),
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Verbose logs.")] = False,
 ) -> None:
     """Run a full ACE-detection campaign against a Python package."""
@@ -117,6 +134,8 @@ def scan(
         worker_timeout_s=worker_timeout,
         parallelism=parallelism,
         max_targets=max_targets,
+        artifact_dir=artifact_dir,
+        resume_from=resume_from,
     )
 
     typer.echo(f"scanning {config.package_path} as {config.package_name!r}", err=True)
