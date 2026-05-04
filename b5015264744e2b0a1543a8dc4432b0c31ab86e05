@@ -1,0 +1,1 @@
+{"git_oid":"b5015264744e2b0a1543a8dc4432b0c31ab86e05","parent_oid":"1e6b9b5b5629858b02e650cfafc5129512bb85c9","ai_metadata":{"model_name":"unknown","prompt":"Implement campaign artifact persistence and resume support for Arbiter scans.","agent_id":"codex","usage":null},"test_metrics":null,"ast_hashes":null,"crdt_states":null,"timestamp":"2026-05-04T23:57:01.736361804Z"}
