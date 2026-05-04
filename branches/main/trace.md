@@ -24,3 +24,4 @@
 [23:54:45] OBSERVE: read tests/conftest.py
 [23:54:45] OBSERVE: read tests/test_orchestrator.py
 [23:54:45] OBSERVE: read tests/conftest.py
+[23:54:45] OBSERVE: read tests/test_cli.py
