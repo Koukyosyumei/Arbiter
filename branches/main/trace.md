@@ -4,3 +4,4 @@
 [23:54:45] OBSERVE: listed files under .
 [23:54:45] OBSERVE: listed files under .
 [23:54:45] OBSERVE: read README.md
+[23:54:45] OBSERVE: read DESIGN.md
