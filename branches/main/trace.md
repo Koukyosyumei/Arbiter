@@ -13,3 +13,4 @@
 [23:54:45] OBSERVE: read src/arbiter/cli.py
 [23:54:45] OBSERVE: read src/arbiter/cli.py
 [23:54:45] OBSERVE: read DESIGN.md
+[23:54:45] OBSERVE: read src/arbiter/orchestrator.py
