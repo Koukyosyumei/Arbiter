@@ -313,43 +313,27 @@ top-ranked finding.
 
 ---
 
-## 8. Sandbox and safety
+## 8. Sandbox and Safety
 
-### 8.1 v0 isolation (current)
+### 8.1 Implementation Status (v0)
+The current isolation model relies on standard OS primitives and Python’s internal hook system to prevent worker crashes or resource exhaustion from affecting the orchestrator.
 
-- Per-job fresh subprocess; oracle can't leak across jobs.
-- `RLIMIT_AS` memory cap.
-- Wall-clock timeout enforced by orchestrator.
+* **Subprocess Isolation:** Every fuzzing harness is executed in a fresh worker subprocess via `python -m arbiter.worker`. This is a functional necessity because `sys.addaudithook` is permanent once installed; a new process ensures each campaign begins with a clean slate of audit hooks.
+* **Resource Constraints:** * **Memory:** The worker calls `resource.setrlimit(resource.RLIMIT_AS, ...)` at startup to enforce RSS (Resident Set Size) limits. This prevents a target package or a specific payload from inducing a system-wide Out-Of-Memory (OOM) event.
+    * **Timeouts:** The orchestrator manages worker lifecycles using `subprocess.run(..., timeout=timeout_s)`. This provides a hard wall-clock stop to prevent the fuzzer from hanging on infinite loops or network-blocked calls.
+* **Environmental Resilience:** * **Auto-Mocking:** To prevent the fuzzer from crashing due to missing optional dependencies (e.g., GUI libraries like `tkinter` or `PyQt`), the worker uses an auto-mocking loop. It catches `ModuleNotFoundError` and registers `MagicMock` objects in `sys.modules` to allow the import of the target package to proceed even in restricted environments.
+    * **Safe Instantiation:** When fuzzing unbound methods, the worker attempts real construction with type-derived defaults before falling back to `MagicMock`. This ensures that "0 witnesses" results are typically due to reachability issues rather than simple instantiation failures.
+* **Oracle Safety:** The audit hook includes a re-entrance guard via `threading.local()` to prevent infinite recursion if the hook itself triggers an audit event. Additionally, the hook is wrapped in a broad exception handler to ensure that fuzzer errors never mask target behavior.
 
-This is **not sufficient** for high-trust targets — a worker can still
-fork, write files, open sockets, or actually run `os.system("rm -rf …")`
-if a payload triggers it.
+### 8.2 Roadmap: v1 Hardened Sandbox
+While current isolation protects the orchestrator, the worker remains theoretically vulnerable to malicious payloads that could perform unauthorized file system or network operations.
 
-### 8.2 v1 sandbox (planned)
+* **Linux User Namespaces:** Future iterations will use `unshare -Urn` to provide workers with a fresh UID and a `tmpfs` root filesystem, limiting visibility to only the target package and the Python standard library.
+* **Seccomp-BPF:** Implementing syscall filtering to deny `execve`, socket creation, and unauthorized disk writes.
+* **Observational Execution:** For the `process` family specifically, `SECCOMP_RET_TRACE` will be used to log attempted system calls. This allows the fuzzer to prove an exploit primitive exists (by observing the `execve` attempt) while killing the process before the shell command actually executes.
 
-For each worker:
-
-- **Linux user namespace** (`unshare -Urn`) with a fresh UID and a tmpfs
-  rootfs containing only the target package's installed files plus
-  `/usr/lib/python3.12/`.
-- **seccomp-bpf** denying `execve`, `network`, `ptrace`, and write syscalls
-  outside the tmpfs.
-- For `process`-family campaigns specifically, a `SECCOMP_RET_TRACE` setup
-  so that an attempted `execve` is *observed and logged* (counts as a
-  witness) rather than denied. The audit hook fires, the seccomp tracer
-  confirms it as a syscall-level event, and the child is killed before the
-  exec actually happens. This is the difference between "the audit hook
-  said `Popen` was called" and "we have syscall-level proof of an exec
-  attempt."
-- macOS dev path: `sandbox-exec` with a permissive profile, no parity
-  claim.
-
-### 8.3 What we accept as a witness pre-sandbox
-
-For v0 the audit hook is the oracle. A worker can technically execute the
-exploit during a fuzz trial. We mitigate by:
-
-- Using harmless seed payloads in tests (`echo {MARKER}`, not `rm`).
-- Running test suites in CI with seccomp wrapping where possible.
-- Documenting the limitation prominently and not pointing v0 at production
-  packages outside controlled environments.
+### 8.3 Security Policy for Witnesses
+Until the v1 sandbox is fully integrated, Arbiter operates under a "harmless observation" policy:
+* Generated seeds use non-destructive payloads (e.g., `echo {MARKER}` instead of `rm -rf /`).
+* Witnesses are recorded even if the worker terminates abnormally, as the oracle drains events incrementally during the Hypothesis loop.
+* Users are advised not to run campaigns on untrusted, unreviewed packages outside of containerized or virtualized environments.
