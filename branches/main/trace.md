@@ -8,3 +8,4 @@
 [23:54:45] OBSERVE: read pyproject.toml
 [23:54:45] OBSERVE: read README.md
 [23:54:45] OBSERVE: read pyproject.toml
+[23:54:45] OBSERVE: read DESIGN.md
