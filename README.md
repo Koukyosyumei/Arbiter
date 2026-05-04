@@ -1,75 +1,56 @@
 # Arbiter
 
-LLM-augmented property-based fuzzer for detecting **arbitrary code execution
-(ACE)** primitives in Python packages.
+**Arbiter** is an LLM-augmented property-based fuzzer designed to detect **Arbitrary Code Execution (ACE) primitives** in Python packages with high precision. 
 
-Arbiter combines three signals that, individually, miss real-world exploits:
+Standard security tools often struggle with Python's dynamic nature, resulting in either too many false positives (static analysis) or missed vulnerabilities due to a lack of reachability context (dynamic fuzzing). Arbiter bridges this gap by combining LLM-guided reasoning with a high-precision runtime oracle.
 
-1. **Static sink inventory** — AST scan locates calls to dangerous APIs
-   (`eval`, `pickle.loads`, `subprocess`, `yaml.unsafe_load`, unsafe Jinja2
-   environments, etc.) across a target package.
-2. **Audit-hook oracle** — `sys.addaudithook` listener inside each worker
-   subprocess captures runtime events tied to those sinks.
-3. **Marker taint** — every fuzzed input embeds a UUID marker; the oracle
-   records an event only when the marker survives into the sink argument,
-   distinguishing *attacker-controlled influence* from incidental sink use.
+---
 
-Together these give a high-precision signal: a witness is a confirmed flow
-from a public callable to a dangerous sink with attacker-controlled bytes
-reaching the sink.
+## The Core Idea: Taint-Aware Fuzzing
+Arbiter does not just look for crashes; it looks for **attacker-controlled influence** over dangerous sinks. 
 
-## Install
+1. **The Marker**: Every fuzzed input is embedded with a unique UUID4 "marker".
+2. **The Oracle**: A runtime monitor uses `sys.addaudithook` to watch dangerous APIs like `eval()`, `subprocess.Popen()`, and `pickle.loads()`.
+3. **The Proof**: A "witness" is only recorded if that specific marker survives into the arguments of a dangerous sink, providing concrete proof of an exploitable primitive.
 
-Requires Python 3.12+. Use [uv](https://github.com/astral-sh/uv) (recommended) or pip:
+---
 
+## Design & Architecture
+Arbiter is built as a multi-stage pipeline coordinated by a central orchestrator.
+
+### 1. Discovery & Reachability (The "Where")
+* **Static Sink Inventory**: Arbiter performs a deterministic AST scan to find all dangerous API calls within a package.
+* **LLM-Guided Discovery**: A Claude-powered agent explores the package to find public-facing entry points (CLIs, network handlers, etc.).
+* **Reachability Analysis**: The LLM analyzes the call graph to determine if an entry point can plausibly reach a sink, filtering out thousands of "dead" paths to focus fuzzing resources.
+
+### 2. Strategy Synthesis (The "How")
+* **Domain-Specific Payloads**: For each valid flow, an LLM generates tailored seeds (e.g., specific `pickle` gadgets or Jinja2 SSTI fragments) instead of relying solely on random mutation.
+
+### 3. Isolated Fuzzing (The "Proof")
+* **Worker Subprocesses**: Fuzzing happens in isolated workers to prevent target crashes from killing the orchestrator.
+* **Hypothesis Integration**: Arbiter uses property-based testing to mutate inputs and "shrink" failures into the smallest possible proof-of-concept input.
+
+---
+
+## Getting Started
+
+### Install
+Requires Python 3.12+.
 ```bash
-uv venv --python 3.12
 uv pip install -e ".[dev]"
 ```
 
-## Usage
+### Run a Scan
+Arbiter reuses your existing Claude Code authentication; no separate API keys are required.
 
 ```bash
 arbiter scan path/to/package --package-name mypkg --output-json result.json
 ```
 
-End-to-end campaign: static sink scan → LLM-driven target discovery and
-reachability → strategy synthesis → parallel worker subprocesses →
-witness aggregation. Exits 0 if any witnesses are found, 1 otherwise.
-
-Useful flags:
-
-| Flag                     | Default | What it does                                      |
-|--------------------------|---------|---------------------------------------------------|
-| `--package-name, -n`     | dirname | Importable name passed to workers                 |
-| `--max-examples`         | 100     | Hypothesis examples per flow                      |
-| `--confidence-threshold` | 0.5     | Drop flows below this reachability confidence     |
-| `--parallelism, -j`      | 4       | Concurrent worker subprocesses                    |
-| `--worker-timeout`       | 60      | Per-worker wall-clock seconds                     |
-| `--output-json, -o`      | (none)  | Write the full `CampaignResult` as JSON           |
-| `--report-dir, -r`       | (none)  | Write per-witness markdown advisories + PoC scripts |
-| `--verbose, -v`          | off     | Stage-by-stage progress logs                      |
-
-The worker can also be driven directly for debugging — see
-[`DESIGN.md`](DESIGN.md) §5.2 for the IPC contract.
-
-Run the test suite to validate the core end-to-end against a deliberately
-vulnerable fixture package:
-
-```bash
-pytest
-```
-
-Live LLM tests are skipped automatically unless the `claude` CLI is on
-PATH (Arbiter reuses your existing Claude Code authentication — no
-separate API key required):
-
-```bash
-pytest tests/test_synthesize_live.py -v
-```
-
 See [`DESIGN.md`](DESIGN.md) for the architecture, threat model, detection
 mechanism, and roadmap.
+
+---
 
 ## License
 
