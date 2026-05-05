@@ -25,32 +25,32 @@
   <text x="480" y="68" text-anchor="middle" font-size="13" fill="#94a3b8">LLM-augmented property-based fuzzer for ACE primitives in Python</text>
 
   <!-- Legend -->
-  <g font-size="11" fill="#cbd5e1">
-    <circle cx="220" cy="92" r="5" fill="#34d399"/>
-    <text x="232" y="96">deterministic</text>
-    <circle cx="335" cy="92" r="5" fill="#a78bfa"/>
-    <text x="347" y="96">LLM-guided</text>
-    <circle cx="438" cy="92" r="5" fill="#60a5fa"/>
-    <text x="450" y="96">orchestration</text>
-    <circle cx="552" cy="92" r="5" fill="#fb923c"/>
-    <text x="564" y="96">isolated runtime</text>
-    <circle cx="678" cy="92" r="5" fill="#f472b6"/>
-    <text x="690" y="96">finding output</text>
+  <g font-size="12.5" fill="#cbd5e1">
+    <circle cx="140" cy="92" r="5.5" fill="#34d399"/>
+    <text x="152" y="97">deterministic</text>
+    <circle cx="270" cy="92" r="5.5" fill="#a78bfa"/>
+    <text x="282" y="97">LLM-guided</text>
+    <circle cx="388" cy="92" r="5.5" fill="#60a5fa"/>
+    <text x="400" y="97">orchestration</text>
+    <circle cx="520" cy="92" r="5.5" fill="#fb923c"/>
+    <text x="532" y="97">isolated runtime</text>
+    <circle cx="668" cy="92" r="5.5" fill="#f472b6"/>
+    <text x="680" y="97">finding output</text>
   </g>
 
   <!-- Input -->
   <g>
     <rect x="380" y="118" width="200" height="48" rx="8" fill="#1e293b" stroke="#475569" stroke-width="1.5"/>
     <text x="480" y="142" text-anchor="middle" font-size="14" font-weight="600" fill="#e2e8f0">Python Package</text>
-    <text x="480" y="158" text-anchor="middle" font-size="11" fill="#94a3b8">target source · entry points · sinks</text>
+    <text x="480" y="160" text-anchor="middle" font-size="12" fill="#94a3b8">target source · entry points · sinks</text>
   </g>
   <line x1="480" y1="166" x2="480" y2="194" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
 
   <!-- Orchestrator band -->
   <g>
     <rect x="60" y="194" width="840" height="78" rx="10" fill="url(#orchBg)" stroke="#3b82f6" stroke-width="1.8"/>
-    <text x="80" y="220" font-size="13" font-weight="700" fill="#93c5fd" letter-spacing="0.5">ORCHESTRATOR</text>
-    <text x="80" y="236" font-size="10.5" fill="#94a3b8">central pipeline coordinator</text>
+    <text x="80" y="220" font-size="14" font-weight="700" fill="#93c5fd" letter-spacing="0.5">ORCHESTRATOR</text>
+    <text x="80" y="238" font-size="12" fill="#94a3b8">central pipeline coordinator</text>
     <g font-size="12.5" font-weight="600" fill="#e2e8f0">
       <text x="260" y="252">discover</text>
       <text x="345" y="252" fill="#475569" font-weight="400">→</text>
@@ -74,39 +74,39 @@
   <!-- Pipeline 1: Static sink scan -->
   <g>
     <rect x="70" y="312" width="220" height="118" rx="9" fill="#1e293b" stroke="#34d399" stroke-width="1.6"/>
-    <text x="180" y="338" text-anchor="middle" font-size="13.5" font-weight="700" fill="#34d399">Static Sink Inventory</text>
-    <text x="180" y="356" text-anchor="middle" font-size="11" fill="#94a3b8">deterministic AST scan</text>
-    <line x1="90" y1="366" x2="270" y2="366" stroke="#334155" stroke-width="1"/>
-    <g font-size="11" fill="#cbd5e1">
-      <text x="90" y="384">• eval / exec / compile</text>
-      <text x="90" y="400">• subprocess / os.system</text>
-      <text x="90" y="416">• pickle / yaml / xml</text>
+    <text x="180" y="338" text-anchor="middle" font-size="14" font-weight="700" fill="#34d399">Static Sink Inventory</text>
+    <text x="180" y="358" text-anchor="middle" font-size="12" fill="#94a3b8">deterministic AST scan</text>
+    <line x1="90" y1="370" x2="270" y2="370" stroke="#334155" stroke-width="1"/>
+    <g font-size="12" fill="#cbd5e1">
+      <text x="90" y="389">• eval / exec / compile</text>
+      <text x="90" y="406">• subprocess / os.system</text>
+      <text x="90" y="423">• pickle / yaml / xml</text>
     </g>
   </g>
 
   <!-- Pipeline 2: Flow hypothesis -->
   <g>
     <rect x="370" y="312" width="220" height="118" rx="9" fill="#1e293b" stroke="#a78bfa" stroke-width="1.6"/>
-    <text x="480" y="338" text-anchor="middle" font-size="13.5" font-weight="700" fill="#a78bfa">Flow Hypothesis</text>
-    <text x="480" y="356" text-anchor="middle" font-size="11" fill="#94a3b8">claude -p · entry → sink</text>
-    <line x1="390" y1="366" x2="570" y2="366" stroke="#334155" stroke-width="1"/>
-    <g font-size="11" fill="#cbd5e1">
-      <text x="390" y="384">• discover public callables</text>
-      <text x="390" y="400">• rank by exposure tier</text>
-      <text x="390" y="416">• prune unreachable paths</text>
+    <text x="480" y="338" text-anchor="middle" font-size="14" font-weight="700" fill="#a78bfa">Flow Hypothesis</text>
+    <text x="480" y="358" text-anchor="middle" font-size="12" fill="#94a3b8">claude -p · entry → sink</text>
+    <line x1="390" y1="370" x2="570" y2="370" stroke="#334155" stroke-width="1"/>
+    <g font-size="12" fill="#cbd5e1">
+      <text x="390" y="389">• discover public callables</text>
+      <text x="390" y="406">• rank by exposure tier</text>
+      <text x="390" y="423">• prune unreachable paths</text>
     </g>
   </g>
 
   <!-- Pipeline 3: Strategy synthesis -->
   <g>
     <rect x="670" y="312" width="220" height="118" rx="9" fill="#1e293b" stroke="#a78bfa" stroke-width="1.6"/>
-    <text x="780" y="338" text-anchor="middle" font-size="13.5" font-weight="700" fill="#a78bfa">Strategy Synthesis</text>
-    <text x="780" y="356" text-anchor="middle" font-size="11" fill="#94a3b8">claude -p · payloads</text>
-    <line x1="690" y1="366" x2="870" y2="366" stroke="#334155" stroke-width="1"/>
-    <g font-size="11" fill="#cbd5e1">
-      <text x="690" y="384">• pickle gadgets</text>
-      <text x="690" y="400">• Jinja2 / SSTI fragments</text>
-      <text x="690" y="416">• shell-injection seeds</text>
+    <text x="780" y="338" text-anchor="middle" font-size="14" font-weight="700" fill="#a78bfa">Strategy Synthesis</text>
+    <text x="780" y="358" text-anchor="middle" font-size="12" fill="#94a3b8">claude -p · payloads</text>
+    <line x1="690" y1="370" x2="870" y2="370" stroke="#334155" stroke-width="1"/>
+    <g font-size="12" fill="#cbd5e1">
+      <text x="690" y="389">• pickle gadgets</text>
+      <text x="690" y="406">• Jinja2 / SSTI fragments</text>
+      <text x="690" y="423">• shell-injection seeds</text>
     </g>
   </g>
 
@@ -118,73 +118,70 @@
   <!-- HarnessSpec -->
   <g>
     <rect x="370" y="478" width="220" height="48" rx="8" fill="#0c4a6e" stroke="#38bdf8" stroke-width="1.6"/>
-    <text x="480" y="500" text-anchor="middle" font-size="13" font-weight="700" fill="#7dd3fc">HarnessSpec</text>
-    <text x="480" y="517" text-anchor="middle" font-size="11" fill="#bae6fd">JSON over stdin · one per (target, sink)</text>
+    <text x="480" y="500" text-anchor="middle" font-size="14" font-weight="700" fill="#7dd3fc">HarnessSpec</text>
+    <text x="480" y="518" text-anchor="middle" font-size="12" fill="#bae6fd">JSON over stdin · one per (target, sink)</text>
   </g>
   <line x1="480" y1="526" x2="480" y2="556" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
 
   <!-- Worker subprocess -->
   <g>
     <rect x="80" y="556" width="800" height="142" rx="10" fill="url(#workerBg)" stroke="#fb923c" stroke-width="1.8"/>
-    <text x="100" y="582" font-size="13" font-weight="700" fill="#fdba74" letter-spacing="0.5">WORKER SUBPROCESS</text>
-    <text x="100" y="598" font-size="10.5" fill="#94a3b8">isolated · one per HarnessSpec · crash-tolerant</text>
+    <text x="100" y="582" font-size="14" font-weight="700" fill="#fdba74" letter-spacing="0.5">WORKER SUBPROCESS</text>
+    <text x="100" y="600" font-size="12" fill="#94a3b8">isolated · one per HarnessSpec · crash-tolerant</text>
 
     <!-- Inner: resource limits -->
     <g>
-      <rect x="110" y="614" width="220" height="68" rx="7" fill="#1e293b" stroke="#475569" stroke-width="1.2"/>
-      <text x="220" y="635" text-anchor="middle" font-size="12.5" font-weight="700" fill="#e2e8f0">Resource Limits</text>
-      <text x="220" y="652" text-anchor="middle" font-size="10.5" fill="#94a3b8">RLIMIT_AS · CPU · timeouts</text>
-      <text x="220" y="670" text-anchor="middle" font-size="10" fill="#64748b">contains runaway targets</text>
+      <rect x="110" y="614" width="220" height="74" rx="7" fill="#1e293b" stroke="#475569" stroke-width="1.2"/>
+      <text x="220" y="636" text-anchor="middle" font-size="13.5" font-weight="700" fill="#e2e8f0">Resource Limits</text>
+      <text x="220" y="656" text-anchor="middle" font-size="12" fill="#94a3b8">RLIMIT_AS · CPU · timeouts</text>
+      <text x="220" y="675" text-anchor="middle" font-size="11.5" fill="#64748b">contains runaway targets</text>
     </g>
 
     <!-- Inner: Oracle -->
     <g>
-      <rect x="370" y="614" width="220" height="68" rx="7" fill="#1e293b" stroke="#f472b6" stroke-width="1.4"/>
-      <text x="480" y="635" text-anchor="middle" font-size="12.5" font-weight="700" fill="#f9a8d4">Oracle</text>
-      <text x="480" y="652" text-anchor="middle" font-size="10.5" fill="#94a3b8">sys.addaudithook · PEP 578</text>
-      <text x="480" y="670" text-anchor="middle" font-size="10" fill="#64748b">marker taint over event args</text>
+      <rect x="370" y="614" width="220" height="74" rx="7" fill="#1e293b" stroke="#f472b6" stroke-width="1.4"/>
+      <text x="480" y="636" text-anchor="middle" font-size="13.5" font-weight="700" fill="#f9a8d4">Oracle</text>
+      <text x="480" y="656" text-anchor="middle" font-size="12" fill="#94a3b8">sys.addaudithook · PEP 578</text>
+      <text x="480" y="675" text-anchor="middle" font-size="11.5" fill="#64748b">marker taint over event args</text>
     </g>
 
     <!-- Inner: Hypothesis -->
     <g>
-      <rect x="630" y="614" width="220" height="68" rx="7" fill="#1e293b" stroke="#475569" stroke-width="1.2"/>
-      <text x="740" y="635" text-anchor="middle" font-size="12.5" font-weight="700" fill="#e2e8f0">Hypothesis @given</text>
-      <text x="740" y="652" text-anchor="middle" font-size="10.5" fill="#94a3b8">mutation + shrinking</text>
-      <text x="740" y="670" text-anchor="middle" font-size="10" fill="#64748b">minimizes proof-of-concept</text>
+      <rect x="630" y="614" width="220" height="74" rx="7" fill="#1e293b" stroke="#475569" stroke-width="1.2"/>
+      <text x="740" y="636" text-anchor="middle" font-size="13.5" font-weight="700" fill="#e2e8f0">Hypothesis @given</text>
+      <text x="740" y="656" text-anchor="middle" font-size="12" fill="#94a3b8">mutation + shrinking</text>
+      <text x="740" y="675" text-anchor="middle" font-size="11.5" fill="#64748b">minimizes proof-of-concept</text>
     </g>
 
     <!-- Internal flow arrows -->
-    <line x1="330" y1="648" x2="368" y2="648" stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)"/>
-    <line x1="590" y1="648" x2="628" y2="648" stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)"/>
+    <line x1="330" y1="651" x2="368" y2="651" stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)"/>
+    <line x1="590" y1="651" x2="628" y2="651" stroke="#64748b" stroke-width="1.4" marker-end="url(#arrow)"/>
   </g>
 
   <!-- Tainted event -->
   <line x1="480" y1="698" x2="480" y2="724" stroke="#f472b6" stroke-width="2" marker-end="url(#arrowAccent)"/>
-  <text x="492" y="715" font-size="10.5" fill="#f9a8d4" font-style="italic">marker survives → _WitnessFound</text>
+  <text x="492" y="716" font-size="12" fill="#f9a8d4" font-style="italic">marker survives → _WitnessFound</text>
 
   <!-- Outputs -->
   <g>
-    <rect x="180" y="724" width="180" height="58" rx="8" fill="#1e293b" stroke="#f472b6" stroke-width="1.5"/>
-    <text x="270" y="747" text-anchor="middle" font-size="13" font-weight="700" fill="#f9a8d4">Witness</text>
-    <text x="270" y="764" text-anchor="middle" font-size="10.5" fill="#94a3b8">minimal repro · audit event</text>
-    <text x="270" y="778" text-anchor="middle" font-size="10" fill="#64748b">JSON</text>
+    <rect x="180" y="724" width="180" height="68" rx="8" fill="#1e293b" stroke="#f472b6" stroke-width="1.5"/>
+    <text x="270" y="748" text-anchor="middle" font-size="14" font-weight="700" fill="#f9a8d4">Witness</text>
+    <text x="270" y="768" text-anchor="middle" font-size="12" fill="#94a3b8">minimal repro · audit event</text>
+    <text x="270" y="784" text-anchor="middle" font-size="11" fill="#64748b">JSON</text>
   </g>
   <g>
-    <rect x="390" y="724" width="180" height="58" rx="8" fill="#1e293b" stroke="#f472b6" stroke-width="1.5"/>
-    <text x="480" y="747" text-anchor="middle" font-size="13" font-weight="700" fill="#f9a8d4">Triage</text>
-    <text x="480" y="764" text-anchor="middle" font-size="10.5" fill="#94a3b8">family · severity · intent</text>
-    <text x="480" y="778" text-anchor="middle" font-size="10" fill="#64748b">downgrades expected calls</text>
+    <rect x="390" y="724" width="180" height="68" rx="8" fill="#1e293b" stroke="#f472b6" stroke-width="1.5"/>
+    <text x="480" y="748" text-anchor="middle" font-size="14" font-weight="700" fill="#f9a8d4">Triage</text>
+    <text x="480" y="768" text-anchor="middle" font-size="12" fill="#94a3b8">family · severity · intent</text>
+    <text x="480" y="784" text-anchor="middle" font-size="11" fill="#64748b">downgrades expected calls</text>
   </g>
   <g>
-    <rect x="600" y="724" width="180" height="58" rx="8" fill="#1e293b" stroke="#f472b6" stroke-width="1.5"/>
-    <text x="690" y="747" text-anchor="middle" font-size="13" font-weight="700" fill="#f9a8d4">Advisory Report</text>
-    <text x="690" y="764" text-anchor="middle" font-size="10.5" fill="#94a3b8">ranked findings</text>
-    <text x="690" y="778" text-anchor="middle" font-size="10" fill="#64748b">JSON · resumable</text>
+    <rect x="600" y="724" width="180" height="68" rx="8" fill="#1e293b" stroke="#f472b6" stroke-width="1.5"/>
+    <text x="690" y="748" text-anchor="middle" font-size="14" font-weight="700" fill="#f9a8d4">Advisory Report</text>
+    <text x="690" y="768" text-anchor="middle" font-size="12" fill="#94a3b8">ranked findings</text>
+    <text x="690" y="784" text-anchor="middle" font-size="11" fill="#64748b">JSON · resumable</text>
   </g>
-  <line x1="360" y1="753" x2="388" y2="753" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
-  <line x1="570" y1="753" x2="598" y2="753" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="360" y1="758" x2="388" y2="758" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="570" y1="758" x2="598" y2="758" stroke="#64748b" stroke-width="2" marker-end="url(#arrow)"/>
 
-  <!-- The 480-bottom-up loopback hint to orchestrator collect (subtle) -->
-  <path d="M 270 724 Q 35 600 60 233" fill="none" stroke="#334155" stroke-width="1" stroke-dasharray="4 4"/>
-  <text x="22" y="450" font-size="9.5" fill="#475569" transform="rotate(-90 22 450)">witnesses → orchestrator.collect</text>
 </svg>
