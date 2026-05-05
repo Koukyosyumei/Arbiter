@@ -22,7 +22,7 @@ import os
 import subprocess
 import sys
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -494,105 +494,14 @@ def run_campaign(
         _write_campaign_artifacts(artifact_dir, result)
         return result
 
-    # 5. Synthesize a strategy per flow — serial.
-    harnesses: list[HarnessSpec] = []
-    for flow in fuzzable:
-        target = next((t for t in result.targets if t.fqn == flow.target_fqn), None)
-        if target is None:
-            continue
-        flow_key = _flow_key(flow)
-        if flow_key in result.strategies:
-            strategy = result.strategies[flow_key]
-            log.info("using strategy for %s from resume artifacts", flow_key)
-        else:
-            log.info(
-                "synthesizing strategy for %s -> %s",
-                flow.target_fqn,
-                flow.sink.callable_qualname,
-            )
-            static_seeds = get_seed_corpus(flow.sink.family)
-            try:
-                strategy = synthesize_strategy(target, flow.sink, flow=flow, llm=client)
-            except Exception as exc:
-                # Common failure: Claude quota exhausted mid-campaign. The static
-                # seed corpus alone covers most known patterns for each sink
-                # family — a degraded run with no LLM-tailored seeds still fires
-                # witnesses on canonical bugs.
-                msg = f"synthesize_strategy({flow_key}) failed (using static corpus): {exc!r}"
-                log.warning(msg)
-                result.errors.append(msg)
-                if not static_seeds:
-                    continue
-                strategy = StrategySpec(kind="text", params={}, seeds=list(static_seeds))
-            # Merge curated static corpus with LLM-generated seeds. Static seeds
-            # come first so they're tried before LLM variations; dict.fromkeys
-            # preserves order while deduping; the cap keeps the strategy small.
-            merged = list(dict.fromkeys([*static_seeds, *strategy.seeds]))[
-                :MAX_SEEDS_PER_STRATEGY
-            ]
-            strategy = strategy.model_copy(update={"seeds": merged})
-            result.strategies[flow_key] = strategy
-            _write_artifact(
-                artifact_dir,
-                "strategies.json",
-                {k: v.model_dump(mode="json") for k, v in result.strategies.items()},
-            )
-            _write_artifact(artifact_dir, "errors.json", result.errors)
-        # If reachability identified a single-arg-fuzzable leaf inside the
-        # call chain, fuzz it instead of the entry — most real entry points
-        # have complex signatures the worker can't synthesize. The flow's
-        # rationale already explains how the entry-to-leaf path preserves taint.
-        harness_module = flow.harness_module or target.module
-        harness_qualname = flow.harness_qualname or target.qualname
-        leaf_overrides_entry = (
-            flow.harness_module is not None and flow.harness_qualname is not None
-            and (flow.harness_module, flow.harness_qualname)
-            != (target.module, target.qualname)
-        )
-        # For loaded_file_content flows where the harness IS the entry, the
-        # worker materializes the payload to a temp file and passes the path
-        # to the parser. When reachability has descended past the file-loader
-        # to a leaf taking scalar bytes (e.g. `run_asciidoctor(self, i_path,
-        # o_path)`), file materialization is *wrong* — the payload should
-        # arrive at the leaf as the literal string the function will splice
-        # into a shell command, not as a tempfile path.
-        effective_attacker = (
-            flow.attacker_model
-            or target.effective_attacker_model
-        )
-        file_suffix: str | None = None
-        if (
-            effective_attacker == AttackerModel.loaded_file_content
-            and not leaf_overrides_entry
-        ):
-            top_pkg = config.package_name.split(".")[0]
-            file_suffix = _PACKAGE_FILE_SUFFIX_HINTS.get(top_pkg, _DEFAULT_FILE_SUFFIX)
-        harnesses.append(
-            HarnessSpec(
-                target_module=harness_module,
-                target_qualname=harness_qualname,
-                strategy=strategy,
-                marker=uuid.uuid4().hex,
-                max_examples=config.max_examples_per_flow,
-                timeout_s=config.worker_timeout_s,
-                rss_limit_mb=config.rss_limit_mb,
-                payload_as_file_suffix=file_suffix,
-            )
-        )
-
-    if not harnesses:
-        _write_campaign_artifacts(artifact_dir, result)
-        return result
-
-    # 6. Worker pool — parallel subprocesses, blocking-per-thread.
-    # PYTHONPATH must let the worker `import {package_name}` and any submodule.
-    # CRITICAL: do NOT put `pkg_path` itself on sys.path. If the package owns
-    # files whose names collide with stdlib modules (e.g. aider/aider/io.py,
-    # email/, string/, json/), placing pkg_path first shadows the stdlib and
-    # produces "partially initialized module 'io'" circular-import crashes
-    # before any user code runs. We only need the *parent* dir on the path so
-    # `import {package_name}` works. For dotted package names ("leo.core"),
-    # walk up to the directory whose basename matches the topmost segment.
+    # PYTHONPATH for workers — computed up front so we can dispatch harnesses
+    # inside the synthesis loop. Workers `import {package_name}`, so the parent
+    # dir must be on sys.path. CRITICAL: do NOT put `pkg_path` itself on
+    # sys.path — if the package owns files whose names collide with stdlib
+    # (e.g. aider/aider/io.py, email/, string/, json/), placing pkg_path first
+    # shadows the stdlib and produces "partially initialized module 'io'"
+    # circular-import crashes before any user code runs. For dotted package
+    # names ("leo.core"), walk up to the topmost segment's parent.
     pkg_path = config.package_path
     pythonpath_extra: list[Path] = [pkg_path.parent]
     top_segment = config.package_name.split(".")[0]
@@ -606,15 +515,120 @@ def run_campaign(
         if cur.parent == cur:
             break
         cur = cur.parent
-    log.info("running %d harnesses with parallelism=%d", len(harnesses), config.parallelism)
+
     _reset_jsonl_artifact(artifact_dir, "workers.jsonl")
+
+    # 5+6. Synthesize a strategy per flow and dispatch its harness as soon as
+    # the strategy is ready, so worker subprocesses overlap with the remaining
+    # synthesis calls. Synthesis is API-bound (each `claude -p` call is
+    # 30-180s); without pipelining the worker pool sits idle for that entire
+    # phase. Drain runs from the same executor once synthesis is done.
+    futures: dict[Future, HarnessSpec] = {}
     with ThreadPoolExecutor(max_workers=config.parallelism) as pool:
-        futures = {
-            pool.submit(
+        for flow in fuzzable:
+            target = next((t for t in result.targets if t.fqn == flow.target_fqn), None)
+            if target is None:
+                continue
+            flow_key = _flow_key(flow)
+            if flow_key in result.strategies:
+                strategy = result.strategies[flow_key]
+                log.info("using strategy for %s from resume artifacts", flow_key)
+            else:
+                log.info(
+                    "synthesizing strategy for %s -> %s",
+                    flow.target_fqn,
+                    flow.sink.callable_qualname,
+                )
+                static_seeds = get_seed_corpus(flow.sink.family)
+                try:
+                    strategy = synthesize_strategy(target, flow.sink, flow=flow, llm=client)
+                except Exception as exc:
+                    # Common failure: Claude quota exhausted mid-campaign. The
+                    # static seed corpus alone covers most known patterns for
+                    # each sink family — a degraded run with no LLM-tailored
+                    # seeds still fires witnesses on canonical bugs.
+                    msg = f"synthesize_strategy({flow_key}) failed (using static corpus): {exc!r}"
+                    log.warning(msg)
+                    result.errors.append(msg)
+                    if not static_seeds:
+                        continue
+                    strategy = StrategySpec(kind="text", params={}, seeds=list(static_seeds))
+                # Merge curated static corpus with LLM-generated seeds. Static
+                # seeds come first so they're tried before LLM variations;
+                # dict.fromkeys preserves order while deduping; the cap keeps
+                # the strategy small.
+                merged = list(dict.fromkeys([*static_seeds, *strategy.seeds]))[
+                    :MAX_SEEDS_PER_STRATEGY
+                ]
+                strategy = strategy.model_copy(update={"seeds": merged})
+                result.strategies[flow_key] = strategy
+                _write_artifact(
+                    artifact_dir,
+                    "strategies.json",
+                    {k: v.model_dump(mode="json") for k, v in result.strategies.items()},
+                )
+                _write_artifact(artifact_dir, "errors.json", result.errors)
+            # If reachability identified a single-arg-fuzzable leaf inside the
+            # call chain, fuzz it instead of the entry — most real entry points
+            # have complex signatures the worker can't synthesize. The flow's
+            # rationale already explains how the entry-to-leaf path preserves
+            # taint.
+            harness_module = flow.harness_module or target.module
+            harness_qualname = flow.harness_qualname or target.qualname
+            leaf_overrides_entry = (
+                flow.harness_module is not None and flow.harness_qualname is not None
+                and (flow.harness_module, flow.harness_qualname)
+                != (target.module, target.qualname)
+            )
+            # For loaded_file_content flows where the harness IS the entry, the
+            # worker materializes the payload to a temp file and passes the
+            # path to the parser. When reachability has descended past the
+            # file-loader to a leaf taking scalar bytes (e.g.
+            # `run_asciidoctor(self, i_path, o_path)`), file materialization is
+            # *wrong* — the payload should arrive at the leaf as the literal
+            # string the function will splice into a shell command, not as a
+            # tempfile path.
+            effective_attacker = (
+                flow.attacker_model
+                or target.effective_attacker_model
+            )
+            file_suffix: str | None = None
+            if (
+                effective_attacker == AttackerModel.loaded_file_content
+                and not leaf_overrides_entry
+            ):
+                top_pkg = config.package_name.split(".")[0]
+                file_suffix = _PACKAGE_FILE_SUFFIX_HINTS.get(top_pkg, _DEFAULT_FILE_SUFFIX)
+            spec = HarnessSpec(
+                target_module=harness_module,
+                target_qualname=harness_qualname,
+                strategy=strategy,
+                marker=uuid.uuid4().hex,
+                max_examples=config.max_examples_per_flow,
+                timeout_s=config.worker_timeout_s,
+                rss_limit_mb=config.rss_limit_mb,
+                payload_as_file_suffix=file_suffix,
+            )
+            future = pool.submit(
                 _run_worker, spec, config.worker_timeout_s + 30, pythonpath_extra
-            ): spec
-            for spec in harnesses
-        }
+            )
+            futures[future] = spec
+            log.info(
+                "dispatched harness %s:%s (queued=%d)",
+                spec.target_module,
+                spec.target_qualname,
+                len(futures),
+            )
+
+        if not futures:
+            _write_campaign_artifacts(artifact_dir, result)
+            return result
+
+        log.info(
+            "draining %d harnesses with parallelism=%d",
+            len(futures),
+            config.parallelism,
+        )
         for fut in as_completed(futures):
             spec = futures[fut]
             try:
@@ -682,7 +696,7 @@ def run_campaign(
     log.info(
         "campaign complete: %d witnesses across %d harnesses",
         len(result.witnesses),
-        len(harnesses),
+        len(futures),
     )
 
     # 7. Triage — rank witnesses for the report. Cheap, deterministic, no LLM.
