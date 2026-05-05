@@ -39,10 +39,18 @@ Arbiter is built as a multi-stage pipeline coordinated by a central orchestrator
 ## Getting Started
 
 ### Install
-Requires Python 3.12+.
+Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
+
 ```bash
+uv venv                      # create .venv/
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
 uv pip install -e ".[dev]"
+arbiter --help               # verify the CLI is on PATH
 ```
+
+The `arbiter` command is installed via the `[project.scripts]` entry point
+in `pyproject.toml`, so it lands on your shell `PATH` as soon as the venv
+is active.
 
 ### Run a Scan
 Arbiter reuses your existing Claude Code authentication; no separate API keys are required.

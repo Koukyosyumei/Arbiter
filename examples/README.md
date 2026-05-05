@@ -35,15 +35,13 @@ importable module name — no extra flag needed.
 
 1. Install Arbiter in editable mode (from the repo root):
    ```bash
+   uv venv
+   source .venv/bin/activate
    uv pip install -e ".[dev]"
    ```
-2. Make sure the example's runtime deps are importable. `eval_calc`,
-   `shell_cat`, and `pickle_session` use only the standard library;
-   `jinja_render` needs Jinja2:
-   ```bash
-   uv pip install jinja2
-   ```
-3. Arbiter reuses your existing Claude Code authentication — no separate
+   This puts the `arbiter` command on your `PATH`. The `[dev]` extra also
+   pulls in `jinja2`, which `jinja_render` needs.
+2. Arbiter reuses your existing Claude Code authentication — no separate
    `ANTHROPIC_API_KEY` is required, but you do need to be logged into
    `claude` locally.
 
