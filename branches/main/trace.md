@@ -95,3 +95,4 @@ _[Checkpoint: 69fa6488 — edited docs/architecture.svg; edited docs/architectur
 [21:58:35] ACT: wrote examples/shell_cat/shell_cat/__init__.py
 [21:58:42] ACT: wrote examples/pickle_session/pickle_session/__init__.py
 [21:58:48] ACT: wrote examples/jinja_render/jinja_render/__init__.py
+[21:59:20] ACT: wrote examples/README.md
