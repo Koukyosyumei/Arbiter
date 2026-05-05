@@ -42,3 +42,4 @@
 [00:33:08] OBSERVE: leo-editor target tree exists at audit/leo-editor; vulnerable file leoMarkup.py present at leo/core/leoMarkup.py (596 lines)
 [00:33:08] OBSERVE: Arbiter pipeline: static sink scan → LLM discover targets → reachability → strategy synth → fuzz workers; package_name like 'leo' triggers .leo file suffix hint for loaded_file_content attacker model
 [00:36:08] OBSERVE: Static sink scan picks up wrapper-mediated g.execute_shell_commands calls at leoMarkup.py:388,399 (via wrapper detection of leoGlobals.execute_shell_commands → subprocess.Popen at line 7465)
+[00:36:08] OBSERVE: Standalone worker test confirms a HarnessSpec for MarkupCommands.run_asciidoctor with seed '{MARKER};echo PWNED;#' produces a tainted subprocess.Popen witness on first try; oracle and binding logic are working
