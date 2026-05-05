@@ -18,6 +18,10 @@ Arbiter does not just look for crashes; it looks for **attacker-controlled influ
 ## Design & Architecture
 Arbiter is built as a multi-stage pipeline coordinated by a central orchestrator.
 
+<p align="center">
+  <img src="docs/architecture.svg" alt="Arbiter architecture overview" width="100%"/>
+</p>
+
 ### 1. Discovery & Reachability (The "Where")
 * **Static Sink Inventory**: Arbiter performs a deterministic AST scan to find all dangerous API calls within a package.
 * **LLM-Guided Discovery**: A Claude-powered agent explores the package to find public-facing entry points (CLIs, network handlers, etc.).
