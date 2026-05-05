@@ -47,3 +47,9 @@
 [01:35:52] ACT: edited orchestrator.py: added _cap_with_decorator_quota helper that reserves cap//2 slots for decorator-scan targets when capping; LLM targets fill the remainder sorted by exposure tier
 [01:35:52] ACT: added test_run_campaign_caps_reserve_quota_for_decorator_targets in tests/test_orchestrator.py: 8 LLM network + 4 decorator cli, cap=8, expects all 4 decorator + 4 network in result
 [02:26:04] ACT: verified end-to-end: fresh arbiter scan with --max-targets=8 against audit/leo-editor produced 2 tainted witnesses for MarkupCommands.run_asciidoctor → subprocess.Popen (input: echo {marker}); 8 targets cap was filled with 4 LLM network targets + 4 leoMarkup decorator-cli targets thanks to quota fix
+
+
+---
+_[Checkpoint: 69f9553c — Arbiter detects leo-editor leoMarkup shell injection witness end-to-end]_
+---
+
