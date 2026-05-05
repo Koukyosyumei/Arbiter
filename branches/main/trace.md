@@ -59,3 +59,4 @@ _[Checkpoint: 69f9553c — Arbiter detects leo-editor leoMarkup shell injection 
 [21:25:00] THINK: user wants README architecture SVG that works on both light/dark GitHub themes; using dark slate background (#0f172a) so colors stay consistent across both
 [21:26:47] ACT: wrote docs/architecture.svg
 [21:26:54] ACT: edited README.md
+[21:28:30] OBSERVE: read README.md
