@@ -88,3 +88,4 @@ _[Checkpoint: 69fa610d — wrote docs/architecture.svg; edited README.md; wrote 
 _[Checkpoint: 69fa6488 — edited docs/architecture.svg; edited docs/architecture.svg; edited docs/architecture.svg]_
 ---
 
+[21:57:12] OBSERVE: read src/arbiter/cli.py
