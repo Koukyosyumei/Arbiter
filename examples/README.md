@@ -12,12 +12,11 @@ produce at least one tainted witness.
 | [`pickle_session`](pickle_session)   | `deserialization` | `pickle.loads()` on a client-supplied blob        |
 | [`jinja_render`](jinja_render)       | `template`        | `jinja2.Template(body)` — SSTI on a post body     |
 
-Every package follows the same shape:
+Every package is a single-file package:
 
 ```
 examples/<name>/
-    <name>/
-        __init__.py   # public entry point with the bug
+    __init__.py   # public entry point with the bug
 ```
 
 So you can scan any of them with:
