@@ -96,6 +96,13 @@ class CampaignConfig:
     # exhausted the budget on monolithic codebases like leo.
     reachability_max_turns: int = 30
     max_targets: int = DEFAULT_MAX_TARGETS
+    # When set, write stage artifacts as JSON so a campaign can be inspected
+    # or resumed without repeating expensive LLM work.
+    artifact_dir: Path | None = None
+    # When set, load any existing stage artifacts from this directory and
+    # continue from the first missing stage. New artifacts are written to
+    # `artifact_dir` when supplied, otherwise back into `resume_from`.
+    resume_from: Path | None = None
 
 
 @dataclass(slots=True)
@@ -107,6 +114,119 @@ class CampaignResult:
     witnesses: list[Witness] = field(default_factory=list)
     scored_witnesses: list[ScoredWitness] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+def _artifact_output_dir(config: CampaignConfig) -> Path | None:
+    return config.artifact_dir or config.resume_from
+
+
+def _artifact_path(root: Path, name: str) -> Path:
+    return root / name
+
+
+def _write_artifact(root: Path | None, name: str, payload: object) -> None:
+    if root is None:
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    _artifact_path(root, name).write_text(json.dumps(payload, indent=2, default=str))
+
+
+def _reset_jsonl_artifact(root: Path | None, name: str) -> None:
+    if root is None:
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    _artifact_path(root, name).write_text("")
+
+
+def _append_jsonl_artifact(root: Path | None, name: str, payload: object) -> None:
+    if root is None:
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    with _artifact_path(root, name).open("a") as f:
+        f.write(json.dumps(payload, default=str) + "\n")
+
+
+def _read_artifact(root: Path | None, name: str) -> object | None:
+    if root is None:
+        return None
+    path = _artifact_path(root, name)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
+def _read_model_list[T](root: Path | None, name: str, model: type[T]) -> list[T] | None:
+    payload = _read_artifact(root, name)
+    if payload is None:
+        return None
+    return [model.model_validate(item) for item in payload]  # type: ignore[attr-defined]
+
+
+def _read_strategies(root: Path | None) -> dict[str, StrategySpec] | None:
+    payload = _read_artifact(root, "strategies.json")
+    if payload is None:
+        return None
+    return {
+        str(key): StrategySpec.model_validate(value)
+        for key, value in dict(payload).items()
+    }
+
+
+def _write_campaign_artifacts(root: Path | None, result: CampaignResult) -> None:
+    """Write all currently populated campaign artifacts.
+
+    Files are intentionally simple and stage-named so users can inspect or edit
+    them by hand while debugging a campaign.
+    """
+    _write_artifact(root, "sinks.json", [s.model_dump(mode="json") for s in result.sinks])
+    _write_artifact(root, "targets.json", [t.model_dump(mode="json") for t in result.targets])
+    _write_artifact(root, "flows.json", [f.model_dump(mode="json") for f in result.flows])
+    _write_artifact(
+        root,
+        "strategies.json",
+        {k: v.model_dump(mode="json") for k, v in result.strategies.items()},
+    )
+    _write_artifact(
+        root, "witnesses.json", [w.model_dump(mode="json") for w in result.witnesses]
+    )
+    _write_artifact(
+        root,
+        "scored_witnesses.json",
+        [sw.model_dump(mode="json") for sw in result.scored_witnesses],
+    )
+    _write_artifact(root, "errors.json", result.errors)
+
+
+def _load_resume_artifacts(root: Path | None, result: CampaignResult) -> None:
+    """Populate `result` with any completed stage files from `root`."""
+    result.sinks = _read_model_list(root, "sinks.json", Sink) or []
+    result.targets = _read_model_list(root, "targets.json", Target) or []
+    result.flows = _read_model_list(root, "flows.json", Flow) or []
+    result.strategies = _read_strategies(root) or {}
+    result.witnesses = _read_model_list(root, "witnesses.json", Witness) or []
+    result.scored_witnesses = (
+        _read_model_list(root, "scored_witnesses.json", ScoredWitness) or []
+    )
+    errors = _read_artifact(root, "errors.json")
+    result.errors = list(errors) if isinstance(errors, list) else []
+
+
+def _scan_sinks_with_wrappers(
+    package_path: Path,
+    package_name: str,
+) -> tuple[list[Sink], list[Sink]]:
+    """Return all sinks plus the wrapper-mediated call sites."""
+    direct_sinks = scan_path(package_path)
+    wrappers = find_wrapper_sinks(package_path, package_path, package_name)
+    wrapper_registry = {
+        qual: (family, f"wraps {sink_qual} (shell helper)")
+        for qual, (family, _, _, sink_qual) in wrappers.items()
+    }
+    wrapper_call_sites: list[Sink] = []
+    if wrapper_registry:
+        for f in _iter_python_files(package_path):
+            wrapper_call_sites.extend(scan_file_with_registry(f, wrapper_registry))
+    return direct_sinks + wrapper_call_sites, wrapper_call_sites
 
 
 def _run_worker(
@@ -140,6 +260,41 @@ def _run_worker(
     return out
 
 
+def _cap_with_decorator_quota(
+    llm_targets: list[Target],
+    decorator_targets: list[Target],
+    cap: int | None,
+) -> list[Target]:
+    """Merge LLM and decorator targets under a cap that reserves a quota for
+    decorator-scan results.
+
+    Decorator-target entries are pre-filtered to files containing wrapper-
+    mediated sink call sites and ranked by sink density, so they are
+    high-signal — co-located with a sink callable that an LLM-discovered
+    network entry probably can't reach. Sorting purely by exposure tier (which
+    the previous policy did) lets a moderately-sized batch of network targets
+    crowd them out entirely.
+
+    Policy:
+      - With no cap, fall through to `merge_targets` (LLM first, dedup).
+      - With a cap, give decorator targets up to `max(1, cap // 2)` slots
+        (clamped to how many decorator targets actually exist), and let LLM
+        targets — sorted by exposure tier — fill the remainder. The merge
+        deduplicates by `(module, qualname)` so a target found by both
+        sources doesn't consume two slots.
+    """
+    if not cap or cap <= 0 or len(llm_targets) + len(decorator_targets) <= cap:
+        return merge_targets(llm_targets, decorator_targets)
+
+    decorator_quota = min(len(decorator_targets), max(1, cap // 2))
+    llm_quota = cap - decorator_quota
+
+    llm_sorted = sorted(
+        llm_targets, key=lambda t: _EXPOSURE_PRIORITY.get(t.exposure, 99)
+    )
+    return merge_targets(llm_sorted[:llm_quota], decorator_targets[:decorator_quota])
+
+
 def _flow_key(flow: Flow) -> str:
     # Include file:line so the same sink callable at different sites — e.g.
     # pickle.loads at four different locations in leoFileCommands.py — gets
@@ -155,6 +310,15 @@ def run_campaign(
     """End-to-end campaign. Single shared `llm` so prompt caches accumulate."""
     client = llm or ClaudeHeadlessClient()
     result = CampaignResult()
+    artifact_dir = _artifact_output_dir(config)
+    if config.resume_from is not None:
+        log.info("loading campaign artifacts from %s", config.resume_from)
+        _load_resume_artifacts(config.resume_from, result)
+        # A completed campaign can be inspected/reserialized without rerunning
+        # fuzzers. If only witnesses exist, triage can be rebuilt below.
+        if result.witnesses and result.scored_witnesses:
+            _write_campaign_artifacts(artifact_dir, result)
+            return result
 
     # 1. Static sink inventory — deterministic, no LLM.
     #
@@ -164,137 +328,170 @@ def run_campaign(
     #       a known process sink. Their callers are added as call-site sinks
     #       so reachability sees `g.execute_shell_commands(cmd)` as a sink at
     #       the *caller's* line, not just at leoGlobals.py:7465.
-    log.info("scanning sinks in %s", config.package_path)
-    direct_sinks = scan_path(config.package_path)
-    wrappers = find_wrapper_sinks(
-        config.package_path, config.package_path, config.package_name
-    )
-    wrapper_registry = {
-        qual: (family, f"wraps {sink_qual} (shell helper)")
-        for qual, (family, _, _, sink_qual) in wrappers.items()
-    }
-    wrapper_call_sites = []
-    if wrapper_registry:
-        for f in _iter_python_files(config.package_path):
-            wrapper_call_sites.extend(scan_file_with_registry(f, wrapper_registry))
-    result.sinks = direct_sinks + wrapper_call_sites
-    log.info(
-        "found %d sinks (%d direct + %d wrapper-call-sites from %d wrappers)",
-        len(result.sinks),
-        len(direct_sinks),
-        len(wrapper_call_sites),
-        len(wrappers),
-    )
+    wrapper_call_sites: list[Sink] = []
+    if result.sinks:
+        log.info("using %d sinks from resume artifacts", len(result.sinks))
+    else:
+        log.info("scanning sinks in %s", config.package_path)
+        result.sinks, wrapper_call_sites = _scan_sinks_with_wrappers(
+            config.package_path, config.package_name
+        )
+        log.info("found %d sinks", len(result.sinks))
+        _write_artifact(
+            artifact_dir, "sinks.json", [s.model_dump(mode="json") for s in result.sinks]
+        )
 
     # 2. LLM discovery — public attack surface — augmented with a static
     # decorator scan (catches `@g.command`/`@click.command`/`@route`/etc.
     # entries the LLM doesn't enumerate). Decorator targets are filtered to
     # files that contain at least one (direct or wrapper-call) sink, so we
     # don't drown the campaign in low-value command callbacks.
-    log.info("discovering targets in %s", config.package_name)
-    try:
-        llm_targets = discover_targets(
+    if result.targets:
+        log.info("using %d targets from resume artifacts", len(result.targets))
+    else:
+        if not wrapper_call_sites:
+            _, wrapper_call_sites = _scan_sinks_with_wrappers(
+                config.package_path, config.package_name
+            )
+        log.info("discovering targets in %s", config.package_name)
+        try:
+            llm_targets = discover_targets(
+                config.package_path,
+                config.package_name,
+                llm=client,
+                max_turns=config.discover_max_turns,
+            )
+        except Exception as exc:
+            msg = f"discover_targets failed: {exc!r}"
+            log.error(msg)
+            result.errors.append(msg)
+            _write_artifact(artifact_dir, "errors.json", result.errors)
+            return result
+        # Filter decorator targets to files that host a *wrapper-mediated*
+        # shell call. These are the high-signal cases (the file's command
+        # callbacks reach a shell exec via a helper function) — exactly the
+        # pattern that LLM discovery misses because the dangerous call is one
+        # indirection away. Files with direct sinks are typically already
+        # covered by reachability from LLM-discovered entries, so we don't
+        # supplement them.
+        wrapper_call_site_files: set[Path] = {
+            Path(s.file) for s in wrapper_call_sites
+        }
+        # Rank files by # of wrapper call sites they host. A file with five
+        # `g.execute_shell_commands(...)` calls is much likelier to harbor an
+        # exploitable decorator-registered command than a file with one — so
+        # those targets float to the top of the merged target list.
+        wrapper_density: dict[Path, int] = {}
+        for s in wrapper_call_sites:
+            wrapper_density[Path(s.file)] = wrapper_density.get(Path(s.file), 0) + 1
+        decorator_targets = find_decorator_targets(
+            config.package_path,
             config.package_path,
             config.package_name,
-            llm=client,
-            max_turns=config.discover_max_turns,
+            sink_files=wrapper_call_site_files,
+            file_rank=wrapper_density,
         )
-    except Exception as exc:
-        msg = f"discover_targets failed: {exc!r}"
-        log.error(msg)
-        result.errors.append(msg)
-        return result
-    # Filter decorator targets to files that host a *wrapper-mediated*
-    # shell call. These are the high-signal cases (the file's command
-    # callbacks reach a shell exec via a helper function) — exactly the
-    # pattern that LLM discovery misses because the dangerous call is one
-    # indirection away. Files with direct sinks are typically already
-    # covered by reachability from LLM-discovered entries, so we don't
-    # supplement them.
-    wrapper_call_site_files: set[Path] = {
-        Path(s.file) for s in wrapper_call_sites
-    }
-    # Rank files by # of wrapper call sites they host. A file with five
-    # `g.execute_shell_commands(...)` calls is much likelier to harbor an
-    # exploitable decorator-registered command than a file with one — so
-    # those targets float to the top of the merged target list.
-    wrapper_density: dict[Path, int] = {}
-    for s in wrapper_call_sites:
-        wrapper_density[Path(s.file)] = wrapper_density.get(Path(s.file), 0) + 1
-    decorator_targets = find_decorator_targets(
-        config.package_path,
-        config.package_path,
-        config.package_name,
-        sink_files=wrapper_call_site_files,
-        file_rank=wrapper_density,
-    )
-    result.targets = merge_targets(llm_targets, decorator_targets)
-    log.info(
-        "found %d targets (%d LLM + %d decorator-registered)",
-        len(result.targets),
-        len(llm_targets),
-        len(decorator_targets),
-    )
+        result.targets = _cap_with_decorator_quota(
+            llm_targets, decorator_targets, config.max_targets
+        )
+        log.info(
+            "found %d targets (%d LLM + %d decorator-registered, cap=%s)",
+            len(result.targets),
+            len(llm_targets),
+            len(decorator_targets),
+            config.max_targets or "∞",
+        )
+        _write_artifact(
+            artifact_dir,
+            "targets.json",
+            [t.model_dump(mode="json") for t in result.targets],
+        )
 
     if not result.sinks or not result.targets:
         log.info("nothing to fuzz; returning")
+        _write_campaign_artifacts(artifact_dir, result)
         return result
 
-    # Cap targets — reachability is the dominant cost and most real packages
-    # only need the network/cli entry points fuzzed in a first campaign.
+    # Resume-only fallback cap. Fresh discovery already capped via
+    # `_cap_with_decorator_quota`; this path runs only when the resumed
+    # targets.json exceeds the configured cap, in which case provenance
+    # (LLM vs decorator scan) isn't recoverable and we fall back to a plain
+    # exposure-priority sort.
     if config.max_targets and len(result.targets) > config.max_targets:
         result.targets.sort(key=lambda t: _EXPOSURE_PRIORITY.get(t.exposure, 99))
         log.info(
-            "capping targets to top %d by exposure (was %d)",
+            "capping resumed targets to top %d by exposure (was %d)",
             config.max_targets,
             len(result.targets),
         )
         result.targets = result.targets[: config.max_targets]
+        _write_artifact(
+            artifact_dir,
+            "targets.json",
+            [t.model_dump(mode="json") for t in result.targets],
+        )
 
     # 3. Reachability per target — serial to avoid concurrent claude -p invocations.
-    all_flows: list[Flow] = []
-    for target in result.targets:
-        # Rank sinks by import-distance and cap the per-target prompt to a
-        # tractable size. On large packages this is the difference between
-        # the LLM finishing inside max_turns and the agent exhausting its
-        # turn budget reading every sink site.
-        target_sinks = filter_sinks_by_imports(
-            target, result.sinks, config.package_path, config.package_name
+    if result.flows:
+        log.info("using %d flows from resume artifacts", len(result.flows))
+    else:
+        all_flows: list[Flow] = []
+        for target in result.targets:
+            # Rank sinks by import-distance and cap the per-target prompt to a
+            # tractable size. On large packages this is the difference between
+            # the LLM finishing inside max_turns and the agent exhausting its
+            # turn budget reading every sink site.
+            target_sinks = filter_sinks_by_imports(
+                target, result.sinks, config.package_path, config.package_name
+            )
+            if len(target_sinks) != len(result.sinks):
+                log.info(
+                    "ranked sinks for %s: %d → %d (cap)",
+                    target.fqn,
+                    len(result.sinks),
+                    len(target_sinks),
+                )
+            log.info("analyzing reachability for %s", target.fqn)
+            try:
+                flows = analyze_reachability(
+                    target,
+                    target_sinks,
+                    config.package_path,
+                    llm=client,
+                    max_turns=config.reachability_max_turns,
+                    package_name=config.package_name,
+                )
+            except Exception as exc:
+                msg = f"analyze_reachability({target.fqn}) failed: {exc!r}"
+                log.warning(msg)
+                result.errors.append(msg)
+                continue
+            all_flows.extend(flows)
+        result.flows = all_flows
+        _write_artifact(
+            artifact_dir, "flows.json", [f.model_dump(mode="json") for f in result.flows]
         )
-        if len(target_sinks) != len(result.sinks):
-            log.info(
-                "ranked sinks for %s: %d → %d (cap)",
-                target.fqn,
-                len(result.sinks),
-                len(target_sinks),
+        _write_artifact(artifact_dir, "errors.json", result.errors)
+
+    if result.witnesses:
+        log.info("using %d witnesses from resume artifacts", len(result.witnesses))
+        if not result.scored_witnesses:
+            result.scored_witnesses = triage_campaign(
+                result.witnesses, result.targets, result.flows
             )
-        log.info("analyzing reachability for %s", target.fqn)
-        try:
-            flows = analyze_reachability(
-                target,
-                target_sinks,
-                config.package_path,
-                llm=client,
-                max_turns=config.reachability_max_turns,
-                package_name=config.package_name,
-            )
-        except Exception as exc:
-            msg = f"analyze_reachability({target.fqn}) failed: {exc!r}"
-            log.warning(msg)
-            result.errors.append(msg)
-            continue
-        all_flows.extend(flows)
-    result.flows = all_flows
+        _write_campaign_artifacts(artifact_dir, result)
+        return result
 
     # 4. Filter by confidence; keep only what's worth fuzzing.
-    fuzzable = [f for f in all_flows if f.confidence >= config.flow_confidence_threshold]
+    fuzzable = [f for f in result.flows if f.confidence >= config.flow_confidence_threshold]
     log.info(
         "%d/%d flows above confidence threshold %.2f",
         len(fuzzable),
-        len(all_flows),
+        len(result.flows),
         config.flow_confidence_threshold,
     )
     if not fuzzable:
+        _write_campaign_artifacts(artifact_dir, result)
         return result
 
     # 5. Synthesize a strategy per flow — serial.
@@ -303,27 +500,44 @@ def run_campaign(
         target = next((t for t in result.targets if t.fqn == flow.target_fqn), None)
         if target is None:
             continue
-        log.info("synthesizing strategy for %s -> %s", flow.target_fqn, flow.sink.callable_qualname)
-        static_seeds = get_seed_corpus(flow.sink.family)
-        try:
-            strategy = synthesize_strategy(target, flow.sink, flow=flow, llm=client)
-        except Exception as exc:
-            # Common failure: Claude quota exhausted mid-campaign. The static
-            # seed corpus alone covers most known patterns for each sink
-            # family — a degraded run with no LLM-tailored seeds still fires
-            # witnesses on canonical bugs.
-            msg = f"synthesize_strategy({_flow_key(flow)}) failed (using static corpus): {exc!r}"
-            log.warning(msg)
-            result.errors.append(msg)
-            if not static_seeds:
-                continue
-            strategy = StrategySpec(kind="text", params={}, seeds=list(static_seeds))
-        # Merge curated static corpus with LLM-generated seeds. Static seeds
-        # come first so they're tried before LLM variations; dict.fromkeys
-        # preserves order while deduping; the cap keeps the strategy small.
-        merged = list(dict.fromkeys([*static_seeds, *strategy.seeds]))[:MAX_SEEDS_PER_STRATEGY]
-        strategy = strategy.model_copy(update={"seeds": merged})
-        result.strategies[_flow_key(flow)] = strategy
+        flow_key = _flow_key(flow)
+        if flow_key in result.strategies:
+            strategy = result.strategies[flow_key]
+            log.info("using strategy for %s from resume artifacts", flow_key)
+        else:
+            log.info(
+                "synthesizing strategy for %s -> %s",
+                flow.target_fqn,
+                flow.sink.callable_qualname,
+            )
+            static_seeds = get_seed_corpus(flow.sink.family)
+            try:
+                strategy = synthesize_strategy(target, flow.sink, flow=flow, llm=client)
+            except Exception as exc:
+                # Common failure: Claude quota exhausted mid-campaign. The static
+                # seed corpus alone covers most known patterns for each sink
+                # family — a degraded run with no LLM-tailored seeds still fires
+                # witnesses on canonical bugs.
+                msg = f"synthesize_strategy({flow_key}) failed (using static corpus): {exc!r}"
+                log.warning(msg)
+                result.errors.append(msg)
+                if not static_seeds:
+                    continue
+                strategy = StrategySpec(kind="text", params={}, seeds=list(static_seeds))
+            # Merge curated static corpus with LLM-generated seeds. Static seeds
+            # come first so they're tried before LLM variations; dict.fromkeys
+            # preserves order while deduping; the cap keeps the strategy small.
+            merged = list(dict.fromkeys([*static_seeds, *strategy.seeds]))[
+                :MAX_SEEDS_PER_STRATEGY
+            ]
+            strategy = strategy.model_copy(update={"seeds": merged})
+            result.strategies[flow_key] = strategy
+            _write_artifact(
+                artifact_dir,
+                "strategies.json",
+                {k: v.model_dump(mode="json") for k, v in result.strategies.items()},
+            )
+            _write_artifact(artifact_dir, "errors.json", result.errors)
         # If reachability identified a single-arg-fuzzable leaf inside the
         # call chain, fuzz it instead of the entry — most real entry points
         # have complex signatures the worker can't synthesize. The flow's
@@ -367,6 +581,7 @@ def run_campaign(
         )
 
     if not harnesses:
+        _write_campaign_artifacts(artifact_dir, result)
         return result
 
     # 6. Worker pool — parallel subprocesses, blocking-per-thread.
@@ -392,6 +607,7 @@ def run_campaign(
             break
         cur = cur.parent
     log.info("running %d harnesses with parallelism=%d", len(harnesses), config.parallelism)
+    _reset_jsonl_artifact(artifact_dir, "workers.jsonl")
     with ThreadPoolExecutor(max_workers=config.parallelism) as pool:
         futures = {
             pool.submit(
@@ -409,17 +625,35 @@ def run_campaign(
                 result.errors.append(msg)
                 continue
             except Exception as exc:
-                msg = f"worker failed for {spec.target_module}:{spec.target_qualname}: {exc!r}"
+                msg = (
+                    f"worker failed for {spec.target_module}:"
+                    f"{spec.target_qualname}: {exc!r}"
+                )
                 log.warning(msg)
                 result.errors.append(msg)
                 continue
             for r in worker_results:
+                _append_jsonl_artifact(
+                    artifact_dir,
+                    "workers.jsonl",
+                    {
+                        "target_module": spec.target_module,
+                        "target_qualname": spec.target_qualname,
+                        "result": r.model_dump(mode="json"),
+                    },
+                )
                 if r.kind == "witness" and r.witness is not None:
                     result.witnesses.append(r.witness)
+                    _write_artifact(
+                        artifact_dir,
+                        "witnesses.json",
+                        [w.model_dump(mode="json") for w in result.witnesses],
+                    )
                 elif r.kind == "error" and r.error:
                     result.errors.append(
                         f"worker {spec.target_module}:{spec.target_qualname}: {r.error}"
                     )
+                    _write_artifact(artifact_dir, "errors.json", result.errors)
                 elif r.kind == "summary":
                     # The summary fires once per worker. If no witnesses came
                     # from this harness, the histogram is the only diagnostic
@@ -455,5 +689,6 @@ def run_campaign(
     result.scored_witnesses = triage_campaign(
         result.witnesses, result.targets, result.flows
     )
+    _write_campaign_artifacts(artifact_dir, result)
 
     return result

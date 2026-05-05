@@ -119,6 +119,10 @@ def test_scan_passes_config_to_orchestrator(monkeypatch, tmp_path: Path):
             "0.7",
             "--parallelism",
             "2",
+            "--artifact-dir",
+            str(tmp_path / "artifacts"),
+            "--resume-from",
+            str(tmp_path / "resume"),
         ],
     )
     cfg = captured["config"]
@@ -126,6 +130,8 @@ def test_scan_passes_config_to_orchestrator(monkeypatch, tmp_path: Path):
     assert cfg.max_examples_per_flow == 42
     assert cfg.flow_confidence_threshold == 0.7
     assert cfg.parallelism == 2
+    assert cfg.artifact_dir == tmp_path / "artifacts"
+    assert cfg.resume_from == tmp_path / "resume"
 
 
 def test_scan_writes_reports_to_dir(monkeypatch, tmp_path: Path):
