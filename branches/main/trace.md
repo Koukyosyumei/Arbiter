@@ -53,3 +53,4 @@
 _[Checkpoint: 69f9553c — Arbiter detects leo-editor leoMarkup shell injection witness end-to-end]_
 ---
 
+[21:24:19] OBSERVE: read README.md
