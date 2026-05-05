@@ -271,3 +271,54 @@ def test_worker_rejects_bad_spec():
     )
     assert proc.returncode == 1
     assert '"kind":"error"' in proc.stdout or '"kind": "error"' in proc.stdout
+
+
+def test_worker_smart_binds_top_level_multiarg_function(tmp_path):
+    """A top-level function with 2+ required positional args (e.g. a blog
+    post renderer `render(title, body, author='x')`) used to TypeError on
+    every example because the worker called `func(payload)`. The smart-default
+    binder fills `title` with `""`, routes `payload` to `body` (HINT_NAMES),
+    and the sink fires."""
+    pkg_dir = tmp_path / "multi_arg_pkg"
+    pkg_dir.mkdir()
+    (pkg_dir / "__init__.py").write_text(
+        "def render(title: str, body: str, author: str = 'anon') -> str:\n"
+        "    return eval(body)  # exercises code_exec audit hook\n"
+    )
+    marker = _make_marker()
+    spec = HarnessSpec(
+        target_module="multi_arg_pkg",
+        target_qualname="render",
+        marker=marker,
+        max_examples=5,
+        strategy=StrategySpec(kind="text", seeds=["'{MARKER}'"]),
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{SRC}{os.pathsep}{tmp_path}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    proc = subprocess.run(
+        [sys.executable, "-m", "arbiter.worker"],
+        input=spec.model_dump_json() + "\n",
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    results: list[WorkerResult] = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                results.append(WorkerResult.model_validate(json.loads(line)))
+            except Exception:
+                continue
+    summary = next((r for r in results if r.kind == "summary"), None)
+    assert summary is not None, f"no summary; stderr={proc.stderr}"
+    type_errors = summary.exception_histogram.get("TypeError", 0)
+    assert type_errors == 0, (
+        f"top-level multi-arg function leaked TypeError on every example: "
+        f"{summary.exception_histogram}"
+    )
+    tainted = [
+        r for r in results if r.kind == "witness" and r.witness and r.witness.event.tainted
+    ]
+    assert tainted, f"no tainted witnesses; stderr={proc.stderr}\nresults={results}"

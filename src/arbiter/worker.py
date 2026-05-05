@@ -138,6 +138,12 @@ def _resolve_callable(module: str, qualname: str) -> Any:
         # on a MagicMock returns a mock (no sink call); explicit binding runs
         # the actual method body.
         return _bind_method(obj, instance)
+    # Top-level function with 2+ required positional args (`render(title, body,
+    # author='x')`, `handler(request, command)`, etc.) — `func(payload)` would
+    # TypeError on every example. Apply the same smart-default routing used for
+    # methods, sans the `self` prepend.
+    if inspect.isfunction(obj) or inspect.isbuiltin(obj):
+        return _bind_function_with_smart_defaults(obj)
     return obj
 
 
@@ -229,6 +235,39 @@ def _make_invoker(target: Any, file_suffix: str | None) -> Any:
                 pass
 
     return _invoke
+
+
+def _bind_function_with_smart_defaults(func: Any) -> Any:
+    """Top-level analogue of `_bind_with_smart_defaults` for plain functions.
+
+    Returns `func` unchanged when it has 0 or 1 required positional args (the
+    caller can pass `payload` directly). For functions with 2+ required args,
+    fills non-payload parameters with type-derived defaults and routes the
+    fuzzed payload to the most plausible parameter, mirroring the method-side
+    binder but without prepending `self`.
+    """
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return func
+    params = list(sig.parameters.values())
+    required = [
+        p for p in params
+        if p.default is inspect.Parameter.empty
+        and p.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                       inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    if len(required) <= 1:
+        return func
+    payload_idx = _payload_index(params)
+    defaults = [_default_for_param(p) for p in params]
+
+    def _call(payload: Any) -> Any:
+        args = list(defaults)
+        args[payload_idx] = payload
+        return func(*args)
+
+    return _call
 
 
 def _bind_with_smart_defaults(func: Any, instance: Any) -> Any:
