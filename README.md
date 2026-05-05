@@ -51,6 +51,22 @@ Arbiter reuses your existing Claude Code authentication; no separate API keys ar
 arbiter scan path/to/package --package-name mypkg --output-json result.json
 ```
 
+### Try it on a toy bug
+The [`examples/`](examples/) directory contains four tiny packages — one per
+ACE family (`eval()`, shell injection, unsafe `pickle.loads`, Jinja2 SSTI) —
+each with a single public entry point that reaches its sink. Each scan
+finishes in under a minute and produces a tainted witness:
+
+```bash
+arbiter scan examples/eval_calc       --report-dir /tmp/eval_calc-report
+arbiter scan examples/shell_cat       --report-dir /tmp/shell_cat-report
+arbiter scan examples/pickle_session  --report-dir /tmp/pickle_session-report
+arbiter scan examples/jinja_render    --report-dir /tmp/jinja_render-report
+```
+
+See [`examples/README.md`](examples/README.md) for what to expect from each
+scan and how to read the output.
+
 See [`DESIGN.md`](DESIGN.md) for the architecture, threat model, detection
 mechanism, and roadmap.
 
