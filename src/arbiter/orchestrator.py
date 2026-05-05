@@ -260,6 +260,41 @@ def _run_worker(
     return out
 
 
+def _cap_with_decorator_quota(
+    llm_targets: list[Target],
+    decorator_targets: list[Target],
+    cap: int | None,
+) -> list[Target]:
+    """Merge LLM and decorator targets under a cap that reserves a quota for
+    decorator-scan results.
+
+    Decorator-target entries are pre-filtered to files containing wrapper-
+    mediated sink call sites and ranked by sink density, so they are
+    high-signal — co-located with a sink callable that an LLM-discovered
+    network entry probably can't reach. Sorting purely by exposure tier (which
+    the previous policy did) lets a moderately-sized batch of network targets
+    crowd them out entirely.
+
+    Policy:
+      - With no cap, fall through to `merge_targets` (LLM first, dedup).
+      - With a cap, give decorator targets up to `max(1, cap // 2)` slots
+        (clamped to how many decorator targets actually exist), and let LLM
+        targets — sorted by exposure tier — fill the remainder. The merge
+        deduplicates by `(module, qualname)` so a target found by both
+        sources doesn't consume two slots.
+    """
+    if not cap or cap <= 0 or len(llm_targets) + len(decorator_targets) <= cap:
+        return merge_targets(llm_targets, decorator_targets)
+
+    decorator_quota = min(len(decorator_targets), max(1, cap // 2))
+    llm_quota = cap - decorator_quota
+
+    llm_sorted = sorted(
+        llm_targets, key=lambda t: _EXPOSURE_PRIORITY.get(t.exposure, 99)
+    )
+    return merge_targets(llm_sorted[:llm_quota], decorator_targets[:decorator_quota])
+
+
 def _flow_key(flow: Flow) -> str:
     # Include file:line so the same sink callable at different sites — e.g.
     # pickle.loads at four different locations in leoFileCommands.py — gets
@@ -356,12 +391,15 @@ def run_campaign(
             sink_files=wrapper_call_site_files,
             file_rank=wrapper_density,
         )
-        result.targets = merge_targets(llm_targets, decorator_targets)
+        result.targets = _cap_with_decorator_quota(
+            llm_targets, decorator_targets, config.max_targets
+        )
         log.info(
-            "found %d targets (%d LLM + %d decorator-registered)",
+            "found %d targets (%d LLM + %d decorator-registered, cap=%s)",
             len(result.targets),
             len(llm_targets),
             len(decorator_targets),
+            config.max_targets or "∞",
         )
         _write_artifact(
             artifact_dir,
@@ -374,12 +412,15 @@ def run_campaign(
         _write_campaign_artifacts(artifact_dir, result)
         return result
 
-    # Cap targets — reachability is the dominant cost and most real packages
-    # only need the network/cli entry points fuzzed in a first campaign.
+    # Resume-only fallback cap. Fresh discovery already capped via
+    # `_cap_with_decorator_quota`; this path runs only when the resumed
+    # targets.json exceeds the configured cap, in which case provenance
+    # (LLM vs decorator scan) isn't recoverable and we fall back to a plain
+    # exposure-priority sort.
     if config.max_targets and len(result.targets) > config.max_targets:
         result.targets.sort(key=lambda t: _EXPOSURE_PRIORITY.get(t.exposure, 99))
         log.info(
-            "capping targets to top %d by exposure (was %d)",
+            "capping resumed targets to top %d by exposure (was %d)",
             config.max_targets,
             len(result.targets),
         )

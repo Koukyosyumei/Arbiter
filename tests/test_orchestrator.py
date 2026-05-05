@@ -351,6 +351,41 @@ def test_run_campaign_caps_targets_by_exposure_tier(monkeypatch):
     assert Exposure.internal not in exposures
 
 
+def test_run_campaign_caps_reserve_quota_for_decorator_targets(monkeypatch):
+    """When the LLM produces enough network targets to fill `max_targets`,
+    decorator-scan targets — which were filtered to files co-located with
+    wrapper-mediated sink call sites and are therefore high-signal — must
+    keep at least half the cap. A regression here lets a leo-style scan
+    crowd out `@g.command` callbacks like `adoc_command` that are the
+    actual exploitable entry points.
+    """
+    llm = [
+        Target(module="m", qualname=f"net_{i}", signature="()", exposure=Exposure.network)
+        for i in range(8)
+    ]
+    decs = [
+        Target(module="m", qualname=f"cmd_{i}", signature="()", exposure=Exposure.cli)
+        for i in range(4)
+    ]
+
+    monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: list(llm))
+    monkeypatch.setattr(orch, "find_decorator_targets", lambda *a, **kw: list(decs))
+    monkeypatch.setattr(orch, "analyze_reachability", lambda *a, **kw: [])
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        max_targets=8,
+    )
+    result = orch.run_campaign(config, llm=object())
+    assert len(result.targets) == 8
+    qualnames = {t.qualname for t in result.targets}
+    # Half the cap must be decorator targets (cmd_0..cmd_3).
+    assert {f"cmd_{i}" for i in range(4)}.issubset(qualnames)
+    # The remaining half is the top-priority LLM (network) targets.
+    assert sum(1 for t in result.targets if t.exposure == Exposure.network) == 4
+
+
 def test_run_campaign_does_not_cap_when_under_limit(monkeypatch):
     target = _eval_target()
     monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: [target])
