@@ -111,6 +111,7 @@ class ClaudeHeadlessClient:
                 max_turns=current_max_turns,
                 system_mode=system_mode,
             )
+            t_call = time.monotonic()
             try:
                 wrapper = self._invoke(cmd, timeout=timeout)
             except subprocess.TimeoutExpired as exc:
@@ -147,6 +148,20 @@ class ClaudeHeadlessClient:
                     time.sleep(RETRY_BACKOFF_S)
                     continue
                 raise
+            # Surface call shape so the operator can see model/turns/cost without
+            # re-running with -v. Cost is in USD, num_turns reflects how many tool
+            # cycles the agent ran (relevant for tools="" → expect 1).
+            num_turns = wrapper.get("num_turns")
+            cost = wrapper.get("total_cost_usd") or wrapper.get("cost_usd")
+            cost_str = f", cost=${cost:.4f}" if isinstance(cost, (int, float)) else ""
+            turns_str = f", turns={num_turns}" if num_turns is not None else ""
+            log.info(
+                "claude -p [%s] %.1fs%s%s",
+                self.model,
+                time.monotonic() - t_call,
+                turns_str,
+                cost_str,
+            )
             return _extract_json(wrapper, schema=schema)
         # unreachable — loop either returns or raises
         raise RuntimeError(f"unreachable: last_err={last_err!r}")

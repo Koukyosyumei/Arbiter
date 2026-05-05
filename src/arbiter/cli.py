@@ -114,11 +114,25 @@ def scan(
             ),
         ),
     ] = None,
-    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Verbose logs.")] = False,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="DEBUG logs (default is INFO).")
+    ] = False,
+    quiet: Annotated[
+        bool, typer.Option("--quiet", "-q", help="Only WARNING+ logs and the final summary.")
+    ] = False,
 ) -> None:
     """Run a full ACE-detection campaign against a Python package."""
+    if quiet and verbose:
+        typer.echo("error: --quiet and --verbose are mutually exclusive", err=True)
+        raise typer.Exit(2)
+    if quiet:
+        level = logging.WARNING
+    elif verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
     logging.basicConfig(
-        level=logging.INFO if verbose else logging.WARNING,
+        level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 

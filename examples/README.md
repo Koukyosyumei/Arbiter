@@ -120,17 +120,30 @@ What you should see:
 
 ## Reading the output
 
-Each scan prints a summary like:
+By default the scan logs each stage as it runs (sink scan, discover, per-target
+reachability, synthesis, worker dispatch + drain, triage), each `claude -p`
+call (model, duration, turn count, cost), and a sample of the synthesized
+seeds. Add `-q` for just the final summary, `-v` for DEBUG-level detail. A
+typical default-mode run looks like:
 
 ```
+... INFO arbiter.orchestrator: found 1 sinks (0.0s)
+... INFO arbiter.llm.sdk: claude -p [haiku] 36.6s, turns=9, cost=$0.0467
+... INFO arbiter.orchestrator: found 2 targets ... in 36.6s
+... INFO arbiter.orchestrator: reachability for shell_cat:head_file: 1 flow(s) (14.7s)
+... INFO arbiter.orchestrator: synthesized 17 seed(s) for ... (27.1s); sample: 'echo {MARKER}'
+... INFO arbiter.orchestrator: dispatched harness shell_cat:head_file (queued=1)
+... INFO arbiter.orchestrator: worker shell_cat:head_file ran 12 examples, 1 witnesses
+... INFO arbiter.orchestrator: campaign complete: 2 witnesses across 2 harnesses in 161.6s
+
 sinks discovered: 1
-targets discovered: 1
-flows hypothesized: 1
-strategies synthesized: 1
-witnesses: 1
+targets discovered: 2
+flows hypothesized: 2
+strategies synthesized: 2
+witnesses: 2
 
 ranked witnesses:
-  0.842  [TAINTED] eval_calc.evaluate -> compile (code_exec)
+  0.510  [TAINTED] shell_cat:head_file -> subprocess.Popen (process)
 ```
 
 With `--report-dir`, you also get:

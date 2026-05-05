@@ -451,7 +451,7 @@ def run_campaign(
                 target, result.sinks, config.package_path, config.package_name
             )
             if len(target_sinks) != len(result.sinks):
-                log.info(
+                log.debug(
                     "ranked sinks for %s: %d → %d (cap)",
                     target.fqn,
                     len(result.sinks),
@@ -582,11 +582,13 @@ def run_campaign(
                 ]
                 strategy = strategy.model_copy(update={"seeds": merged})
                 result.strategies[flow_key] = strategy
+                sample = repr(strategy.seeds[0])[:100] if strategy.seeds else "<empty>"
                 log.info(
-                    "synthesized %d seed(s) for %s (%.1fs)",
+                    "synthesized %d seed(s) for %s (%.1fs); sample: %s",
                     len(strategy.seeds),
                     flow_key,
                     time.monotonic() - t_synth,
+                    sample,
                 )
                 _write_artifact(
                     artifact_dir,
