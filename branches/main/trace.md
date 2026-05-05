@@ -61,3 +61,9 @@ _[Checkpoint: 69f9553c — Arbiter detects leo-editor leoMarkup shell injection 
 [21:26:54] ACT: edited README.md
 [21:28:30] OBSERVE: read README.md
 [21:28:36] ACT: wrote docs/architecture.svg (self-contained dark slate bg #0f172a so it renders consistently in both GitHub themes); embedded in README under Design & Architecture
+
+
+---
+_[Checkpoint: 69fa610d — wrote docs/architecture.svg; edited README.md; wrote docs/architecture.svg (self-contained dark slate bg #0f172a so it r…]_
+---
+

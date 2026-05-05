@@ -17,3 +17,16 @@ Root cause was orchestrator's max_targets cap evicting decorator-scan cli target
 
 ---
 
+## Commit 69fa610d — 2026-05-05 21:28 UTC
+
+### Branch Purpose
+Primary development branch
+
+### Previous Progress Summary
+Root cause was orchestrator's max_targets cap evicting decorator-scan cli targets when LLM returned enough network targets. Fix: _cap_with_decorator_quota reserves cap//2 slots for decorator-scan results. Verified: 218 unit tests pass, fresh leo scan now produces witness for MarkupCommands.run_asciidoctor → subprocess.Popen via execute_shell_commands wrapper at leoMarkup.py:388
+
+### This Commit's Contribution
+
+
+---
+
