@@ -21,6 +21,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -311,6 +312,7 @@ def run_campaign(
     client = llm or ClaudeHeadlessClient()
     result = CampaignResult()
     artifact_dir = _artifact_output_dir(config)
+    t_campaign_start = time.monotonic()
     if config.resume_from is not None:
         log.info("loading campaign artifacts from %s", config.resume_from)
         _load_resume_artifacts(config.resume_from, result)
@@ -333,10 +335,11 @@ def run_campaign(
         log.info("using %d sinks from resume artifacts", len(result.sinks))
     else:
         log.info("scanning sinks in %s", config.package_path)
+        t_sink_scan = time.monotonic()
         result.sinks, wrapper_call_sites = _scan_sinks_with_wrappers(
             config.package_path, config.package_name
         )
-        log.info("found %d sinks", len(result.sinks))
+        log.info("found %d sinks (%.1fs)", len(result.sinks), time.monotonic() - t_sink_scan)
         _write_artifact(
             artifact_dir, "sinks.json", [s.model_dump(mode="json") for s in result.sinks]
         )
@@ -354,6 +357,7 @@ def run_campaign(
                 config.package_path, config.package_name
             )
         log.info("discovering targets in %s", config.package_name)
+        t_discover = time.monotonic()
         try:
             llm_targets = discover_targets(
                 config.package_path,
@@ -395,11 +399,12 @@ def run_campaign(
             llm_targets, decorator_targets, config.max_targets
         )
         log.info(
-            "found %d targets (%d LLM + %d decorator-registered, cap=%s)",
+            "found %d targets (%d LLM + %d decorator-registered, cap=%s) in %.1fs",
             len(result.targets),
             len(llm_targets),
             len(decorator_targets),
             config.max_targets or "∞",
+            time.monotonic() - t_discover,
         )
         _write_artifact(
             artifact_dir,
@@ -435,6 +440,7 @@ def run_campaign(
     if result.flows:
         log.info("using %d flows from resume artifacts", len(result.flows))
     else:
+        t_reach_loop = time.monotonic()
         all_flows: list[Flow] = []
         for target in result.targets:
             # Rank sinks by import-distance and cap the per-target prompt to a
@@ -452,6 +458,7 @@ def run_campaign(
                     len(target_sinks),
                 )
             log.info("analyzing reachability for %s", target.fqn)
+            t_reach = time.monotonic()
             try:
                 flows = analyze_reachability(
                     target,
@@ -466,8 +473,20 @@ def run_campaign(
                 log.warning(msg)
                 result.errors.append(msg)
                 continue
+            log.info(
+                "reachability for %s: %d flow(s) (%.1fs)",
+                target.fqn,
+                len(flows),
+                time.monotonic() - t_reach,
+            )
             all_flows.extend(flows)
         result.flows = all_flows
+        log.info(
+            "reachability complete: %d total flow(s) from %d target(s) in %.1fs",
+            len(result.flows),
+            len(result.targets),
+            time.monotonic() - t_reach_loop,
+        )
         _write_artifact(
             artifact_dir, "flows.json", [f.model_dump(mode="json") for f in result.flows]
         )
@@ -539,6 +558,7 @@ def run_campaign(
                     flow.target_fqn,
                     flow.sink.callable_qualname,
                 )
+                t_synth = time.monotonic()
                 static_seeds = get_seed_corpus(flow.sink.family)
                 try:
                     strategy = synthesize_strategy(target, flow.sink, flow=flow, llm=client)
@@ -562,6 +582,12 @@ def run_campaign(
                 ]
                 strategy = strategy.model_copy(update={"seeds": merged})
                 result.strategies[flow_key] = strategy
+                log.info(
+                    "synthesized %d seed(s) for %s (%.1fs)",
+                    len(strategy.seeds),
+                    flow_key,
+                    time.monotonic() - t_synth,
+                )
                 _write_artifact(
                     artifact_dir,
                     "strategies.json",
@@ -694,9 +720,10 @@ def run_campaign(
                     )
 
     log.info(
-        "campaign complete: %d witnesses across %d harnesses",
+        "campaign complete: %d witnesses across %d harnesses in %.1fs",
         len(result.witnesses),
         len(futures),
+        time.monotonic() - t_campaign_start,
     )
 
     # 7. Triage — rank witnesses for the report. Cheap, deterministic, no LLM.
