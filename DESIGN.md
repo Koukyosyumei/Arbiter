@@ -204,14 +204,13 @@ The worker drives a hand-rolled iterator, not a property-based test
 framework. `arbiter.mutators.variations(family, seeds, marker, budget,
 kind)` yields payloads in three tiers:
 
-1. **Seeds verbatim** — every LLM- and corpus-derived seed with the
-   `{MARKER}` placeholder substituted, in order.
-2. **Family-specific structural variants** — a small registry of
-   structurally valid extensions per sink family (e.g. swap the YAML
-   python-tag callable, swap the shell metachar separator, vary the
-   Python-source literal form). Every yielded payload is by construction
-   a candidate that *could* reach the sink; there is no random-byte
-   spray.
+1. **Seeds verbatim** — every LLM-, static-corpus-, and witness-corpus-
+   derived seed with the `{MARKER}` placeholder substituted, in order.
+2. **Family-specific structural variants** — see §5.5. Each family with a
+   registered grammar yields the cross-product of its alternation/
+   concatenation tree (e.g. YAML tag × callable × body-form). Code_exec
+   additionally runs token-aware mutations on the canonical forms via
+   Python's `tokenize` module.
 3. **Cycled re-yields** of the seeds, until `max_examples` is reached.
 
 For each yielded payload, the worker calls `invoke(payload)`, then drains
@@ -243,6 +242,83 @@ selects which family-specific extender (if any) the mutator runs after
 the canonical seeds. Families with no registered extender (xml, path,
 import) fall straight through from canonical seeds to seed cycling — the
 LLM and the static corpus carry the load there.
+
+The orchestrator merges *three* sources of seeds before sending them to
+the worker, in priority order: cross-campaign **witness corpus** (§5.5)
+→ curated **static corpus** (`payloads/`) → LLM-synthesized variations.
+Earliest-yielded seeds dominate the worker's budget, so a payload that
+worked yesterday is tried before today's LLM guess.
+
+### 5.5 Cross-campaign witness corpus
+
+`arbiter.corpus.WitnessCorpus` persists tainted-witness payloads to disk
+so future campaigns can replay them as zeroth-tier seeds. The on-disk
+schema is borrowed from Hypothesis's `ExampleDatabase` (key-addressed
+bytes store with `save`/`fetch`), but the *key schema* is hierarchical
+because ACE payloads transfer well across targets:
+
+```
+Scope = (sink_family, package?, target_fqn?)
+
+tier 1 (narrowest): (family, package, target_fqn)
+tier 2:             (family, package)
+tier 3 (broadest):  (family,)
+```
+
+`save(scope, payload, marker, score)` broadcasts the payload to every
+tier of `scope`. `fetch(scope)` unions across tiers, deduplicates, and
+yields in descending **depth-feedback score** order — the score is
+captured at save time as the count of audit events triggered by the
+payload, so payloads that exercised more of the call chain (parser →
+resolver → sink) outrank shallow short-circuits on replay.
+
+The corpus is scoped per-user under `~/.arbiter/corpus/` by default
+(overridable via `--corpus-root` or disabled via `--no-corpus`).
+Storage is append-only JSONL — single-line writes are atomic for
+sub-PIPE_BUF sizes on POSIX, which covers ACE payloads comfortably,
+so no locking is needed across worker subprocesses.
+
+The live UUID marker is substituted back to the literal `{MARKER}`
+placeholder before storage so each campaign's payload is reusable
+across campaigns whose markers differ.
+
+### 5.6 Grammar engine + token-aware mutator
+
+The family extenders in §5.3 tier 2 are not hand-rolled string
+templates; they delegate to a tiny grammar DFS in
+`arbiter.mutators.grammar`:
+
+```python
+@dataclass(frozen=True)
+class Rule:    parts:   tuple[Node, ...]   # concatenation
+@dataclass(frozen=True)
+class Choice:  options: tuple[Node, ...]   # alternation
+```
+
+`enumerate_rule(rule, marker)` walks the cross-product depth-first and
+substitutes `{MARKER}` at yield. Each family's grammar lives in
+`arbiter.mutators.grammars`:
+
+| Family            | Grammar shape                                              | Cross-product size |
+|-------------------|------------------------------------------------------------|--------------------|
+| `deserialization` | `tag(2) × callable(6) × body-form(2)`                      | 24                 |
+| `process`         | `prefix(7) × payload(2) × suffix(3) + 4 substitution forms` | 46                 |
+| `template`        | `4 literal forms + 4 globals walkers × 1 op`               | 8                  |
+
+We deliberately don't support recursion, weights, or shrinker-friendly
+representations — generation is one DFS, no backtracking. The corpus
+this produces is finite and small (typically <100 payloads per family);
+the worker's `max_examples` cap clips it.
+
+For `code_exec`, structural grammar isn't expressive enough — every
+variant has to be a syntactically valid Python expression. The
+`arbiter.mutators.tokens` module re-tokenizes each canonical seed via
+the standard library's `tokenize` module and yields token-level
+mutations: swap STRING-token quote forms (`'X'` ↔ `"X"` ↔ `f'X'` ↔
+`r'X'`), wrap the whole expression in parens or an identity tuple, and
+append marker-bearing trailing comments. Every yield is a valid
+expression by construction; we never produce a string that
+`compile()` would reject.
 
 ---
 
