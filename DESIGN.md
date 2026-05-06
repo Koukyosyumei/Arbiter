@@ -83,14 +83,14 @@ execute attacker-chosen code. The canonical examples:
        ┌─────────────────────────────────────────────────────────────┐
        │ Worker subprocess (one per harness; isolated)               │
        │                                                             │
-       │   resource limits ─ sys.addaudithook ─ Hypothesis @given    │
+       │   resource limits ─ sys.addaudithook ─  mutator loop       │
        │              │              │                  │            │
        │              ▼              ▼                  ▼            │
-       │        RLIMIT_AS       Oracle            mutation +         │
-       │                     (marker taint)        shrinking         │
+       │        RLIMIT_AS       Oracle           seeds + variants    │
+       │                     (marker taint)        per family        │
        │                                                             │
-       │   on tainted event: raise _WitnessFound → Hypothesis        │
-       │   shrinks to minimal repro → emit Witness JSON              │
+       │   on tainted drain: capture input + events,                 │
+       │   emit Witness JSON, break the inner loop                   │
        └────────────────────────┬────────────────────────────────────┘
                                 ▼
                        Orchestrator collects ──► triage ──► report
@@ -184,7 +184,8 @@ This forces every fuzzing job into a fresh subprocess. Side benefits:
 - RSS limits via `RLIMIT_AS` are scoped per job.
 - A worker that hits a real exploit and crashes the interpreter doesn't
   poison the orchestrator.
-- Hypothesis state (database, settings) is reset per run.
+- No shared mutable state across workers — each one starts with a fresh
+  audit hook, a fresh oracle, and a fresh payload iterator.
 
 ### 5.2 IPC
 
@@ -197,30 +198,51 @@ exit   : 0 normal, 1 internal error
 The orchestrator enforces wall-clock timeout via `kill -9`. The worker
 enforces memory via `setrlimit(RLIMIT_AS)`.
 
-### 5.3 Hypothesis integration
+### 5.3 Mutator-driven fuzz loop
 
-A `_WitnessFound` exception is raised inside the `@given` test whenever
-the oracle drains a tainted event. Hypothesis treats this as a failing
-example and shrinks the input toward the minimal form that still triggers
-the exception. Because every shrink iteration also fires the audit hook
-and re-checks marker hits, shrinking converges on the *smallest input
-that still flows the marker into the sink* — which is exactly the minimal
-PoC.
+The worker drives a hand-rolled iterator, not a property-based test
+framework. `arbiter.mutators.variations(family, seeds, marker, budget,
+kind)` yields payloads in three tiers:
 
-The Hypothesis test never fails on target exceptions; the oracle is the
-sole signal.
+1. **Seeds verbatim** — every LLM- and corpus-derived seed with the
+   `{MARKER}` placeholder substituted, in order.
+2. **Family-specific structural variants** — a small registry of
+   structurally valid extensions per sink family (e.g. swap the YAML
+   python-tag callable, swap the shell metachar separator, vary the
+   Python-source literal form). Every yielded payload is by construction
+   a candidate that *could* reach the sink; there is no random-byte
+   spray.
+3. **Cycled re-yields** of the seeds, until `max_examples` is reached.
 
-### 5.4 Strategy translation
+For each yielded payload, the worker calls `invoke(payload)`, then drains
+the oracle. The first drain that contains any tainted event captures the
+input and breaks the loop — that's the witness. Target-side exceptions
+are tallied into the summary histogram but never gate the witness signal:
+the oracle is the sole signal.
 
-`StrategySpec.kind` selects a generator family:
+This replaces an earlier design that used `hypothesis.@given` as the
+driver and raised a sentinel exception to drive shrinking. Empirically
+the shrink phase contributed nothing measurable to witness rate at
+Arbiter's scale: the LLM-curated seeds already hit on the first or
+second example, and the structural seeds the shrinker tried to minimize
+(YAML tag forms, Jinja globals chains) have no smaller equivalent that
+still reaches the sink. The current loop is ~90 LOC shorter, has no
+flakiness path, and stops on the first witness rather than continuing
+to shrink past it.
 
-- `text` — `st.text()` with marker prefix prepended; one_of with seed strategies.
-- `bytes` — `st.binary()` with marker bytes prepended.
+### 5.4 Strategy → mutator hand-off
 
-`seeds` are literal payloads carrying the `{MARKER}` placeholder; the worker
-substitutes the real UUID and registers each as `st.just(...)` so they're
-always tried. This is how known-bad payloads (pickle gadgets, YAML
-`!!python/object/apply`, Jinja SSTI fragments) enter the corpus.
+`StrategySpec.kind` is the on-the-wire payload type:
+
+- `text` — seeds and variants are passed to the target as `str`.
+- `bytes` — seeds and variants are UTF-8 encoded before being passed.
+
+`seeds` carries the literal `{MARKER}` placeholder; the worker
+substitutes the real UUID at materialization time. `HarnessSpec.sink_family`
+selects which family-specific extender (if any) the mutator runs after
+the canonical seeds. Families with no registered extender (xml, path,
+import) fall straight through from canonical seeds to seed cycling — the
+LLM and the static corpus carry the load there.
 
 ---
 
@@ -335,5 +357,5 @@ While current isolation protects the orchestrator, the worker remains theoretica
 ### 8.3 Security Policy for Witnesses
 Until the v1 sandbox is fully integrated, Arbiter operates under a "harmless observation" policy:
 * Generated seeds use non-destructive payloads (e.g., `echo {MARKER}` instead of `rm -rf /`).
-* Witnesses are recorded even if the worker terminates abnormally, as the oracle drains events incrementally during the Hypothesis loop.
+* Witnesses are recorded even if the worker terminates abnormally, as the oracle drains events incrementally during the fuzz loop.
 * Users are advised not to run campaigns on untrusted, unreviewed packages outside of containerized or virtualized environments.
