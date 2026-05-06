@@ -414,7 +414,7 @@ def _run_one_harness(spec: HarnessSpec) -> None:
         deadline=None,
         verbosity=Verbosity.quiet,
         suppress_health_check=list(HealthCheck),
-        phases=(Phase.generate, Phase.shrink),
+        phases=(Phase.generate,),
         database=None,
     )
     @given(strategy)
