@@ -22,7 +22,10 @@ import sys
 import traceback
 from typing import Any
 
+from pathlib import Path
+
 from arbiter import mutators
+from arbiter.corpus import DirectoryWitnessCorpus, NullWitnessCorpus, Scope, WitnessCorpus
 from arbiter.models import (
     AuditEvent,
     HarnessSpec,
@@ -348,6 +351,49 @@ def _try_construct_with_defaults(cls: Any) -> Any:
         return None
 
 
+def _build_corpus(spec: HarnessSpec) -> WitnessCorpus:
+    """Resolve the corpus impl from the harness spec.
+
+    Returns ``NullWitnessCorpus`` when persistence is disabled (no
+    ``corpus_root`` set or no ``package_name`` to scope writes against).
+    """
+    if not spec.corpus_root or not spec.package_name:
+        return NullWitnessCorpus()
+    return DirectoryWitnessCorpus(Path(spec.corpus_root))
+
+
+def _persist_to_corpus(spec: HarnessSpec, payload: Any, *, score: int = 0) -> None:
+    """Save the witness-firing payload back to the cross-campaign corpus.
+
+    ``score`` is a depth-feedback hint (currently the count of audit events
+    captured during the payload's run). Higher = the payload exercised more
+    of the call chain; future replays prefer high-score payloads.
+
+    Failures are swallowed — corpus persistence is a "nice to have", and the
+    witness has already been emitted to the orchestrator. We never want a
+    corpus write to mask a real finding.
+    """
+    if not isinstance(payload, (str, bytes)):
+        return
+    if spec.sink_family is None or spec.package_name is None or not spec.corpus_root:
+        return
+    try:
+        corpus = _build_corpus(spec)
+        corpus.save(
+            Scope(
+                sink_family=spec.sink_family,
+                package=spec.package_name,
+                target_fqn=f"{spec.target_module}:{spec.target_qualname}",
+            ),
+            payload,
+            marker=spec.marker,
+            score=score,
+        )
+    except BaseException:
+        # Corpus write must never propagate — the witness is already emitted.
+        pass
+
+
 def _run_one_harness(spec: HarnessSpec) -> None:
     target = _resolve_callable(spec.target_module, spec.target_qualname)
     oracle = Oracle(marker=spec.marker)
@@ -398,6 +444,16 @@ def _run_one_harness(spec: HarnessSpec) -> None:
                 input_repr=repr(captured_input),
             )
             _emit(WorkerResult(kind="witness", witness=witness))
+        # Score = audit-event count captured for the witness payload. Acts as
+        # a depth-feedback proxy: payloads that exercised more of the call
+        # chain (e.g. parser → resolver → sink) outrank payloads that
+        # short-circuited at the entry. Future v1 can replace this with
+        # max-stack-depth from the events' stack_summary.
+        _persist_to_corpus(
+            spec,
+            captured_input,
+            score=len(captured_events),
+        )
 
     # Untainted ALWAYS_RECORD events are reported separately; the triage layer
     # decides if any deserve attention as side-channel signals.

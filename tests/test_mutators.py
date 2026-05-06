@@ -32,16 +32,21 @@ def test_variations_respects_budget():
 
 def test_variations_yields_seeds_first_then_extender():
     seeds = ["echo {MARKER}"]
+    # Budget large enough to exhaust the family extender so we can spot-check
+    # the cross-product reaches the command-substitution variants.
     out = list(mutators.variations(
         family=SinkFamily.process,
         seeds=seeds,
         marker="m",
-        budget=4,
+        budget=80,
     ))
     # First yield is the canonical seed; subsequent are family extender variants.
     assert out[0] == "echo m"
-    # Extender for `process` includes shell-metachar permutations carrying the marker.
+    # Every extender yield carries the marker by construction.
     assert all("m" in v for v in out)
+    # Shell-metachar permutations (separator-style and command-substitution)
+    # both appear in the extender output.
+    assert any("; echo m" in v for v in out[1:])
     assert any("$(echo m)" == v or "`echo m`" == v for v in out[1:])
 
 

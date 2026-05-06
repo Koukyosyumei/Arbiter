@@ -27,6 +27,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from arbiter.corpus import DirectoryWitnessCorpus, NullWitnessCorpus, Scope, WitnessCorpus
 from arbiter.llm.discover import discover_targets
 from arbiter.llm.reachability import analyze_reachability, filter_sinks_by_imports
 from arbiter.llm.sdk import ClaudeHeadlessClient, LLMClient
@@ -104,6 +105,10 @@ class CampaignConfig:
     # continue from the first missing stage. New artifacts are written to
     # `artifact_dir` when supplied, otherwise back into `resume_from`.
     resume_from: Path | None = None
+    # Cross-campaign witness corpus root. Payloads that fired tainted witnesses
+    # are persisted here and replayed ahead of LLM/static seeds on the next
+    # campaign. None disables persistence (useful for tests / --no-corpus).
+    corpus_root: Path | None = None
 
 
 @dataclass(slots=True)
@@ -542,6 +547,12 @@ def run_campaign(
     # synthesis calls. Synthesis is API-bound (each `claude -p` call is
     # 30-180s); without pipelining the worker pool sits idle for that entire
     # phase. Drain runs from the same executor once synthesis is done.
+    corpus: WitnessCorpus = (
+        DirectoryWitnessCorpus(config.corpus_root)
+        if config.corpus_root is not None
+        else NullWitnessCorpus()
+    )
+
     futures: dict[Future, HarnessSpec] = {}
     with ThreadPoolExecutor(max_workers=config.parallelism) as pool:
         for flow in fuzzable:
@@ -560,6 +571,19 @@ def run_campaign(
                 )
                 t_synth = time.monotonic()
                 static_seeds = get_seed_corpus(flow.sink.family)
+                # Pull cross-campaign payloads from the corpus *before* synthesis
+                # so they're available even if the LLM call later fails.
+                corpus_seeds = list(corpus.fetch(Scope(
+                    sink_family=flow.sink.family,
+                    package=config.package_name,
+                    target_fqn=flow.target_fqn,
+                )))
+                if corpus_seeds:
+                    log.info(
+                        "corpus replay: %d payload(s) for %s",
+                        len(corpus_seeds),
+                        flow_key,
+                    )
                 try:
                     strategy = synthesize_strategy(target, flow.sink, flow=flow, llm=client)
                 except Exception as exc:
@@ -570,16 +594,18 @@ def run_campaign(
                     msg = f"synthesize_strategy({flow_key}) failed (using static corpus): {exc!r}"
                     log.warning(msg)
                     result.errors.append(msg)
-                    if not static_seeds:
+                    if not static_seeds and not corpus_seeds:
                         continue
                     strategy = StrategySpec(kind="text", params={}, seeds=list(static_seeds))
-                # Merge curated static corpus with LLM-generated seeds. Static
-                # seeds come first so they're tried before LLM variations;
-                # dict.fromkeys preserves order while deduping; the cap keeps
-                # the strategy small.
-                merged = list(dict.fromkeys([*static_seeds, *strategy.seeds]))[
-                    :MAX_SEEDS_PER_STRATEGY
-                ]
+                # Merge corpus replays + curated static corpus + LLM-generated.
+                # Corpus first (proven priors), then static (canonical), then
+                # LLM (target-specific variations). dict.fromkeys preserves
+                # order while deduping; the cap keeps the strategy small.
+                merged = list(dict.fromkeys([
+                    *corpus_seeds,
+                    *static_seeds,
+                    *strategy.seeds,
+                ]))[:MAX_SEEDS_PER_STRATEGY]
                 strategy = strategy.model_copy(update={"seeds": merged})
                 result.strategies[flow_key] = strategy
                 sample = repr(strategy.seeds[0])[:100] if strategy.seeds else "<empty>"
@@ -637,6 +663,8 @@ def run_campaign(
                 rss_limit_mb=config.rss_limit_mb,
                 payload_as_file_suffix=file_suffix,
                 sink_family=flow.sink.family,
+                corpus_root=str(config.corpus_root) if config.corpus_root else None,
+                package_name=config.package_name,
             )
             future = pool.submit(
                 _run_worker, spec, config.worker_timeout_s + 30, pythonpath_extra

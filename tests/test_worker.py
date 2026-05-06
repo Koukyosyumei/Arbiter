@@ -260,6 +260,40 @@ def test_worker_falls_back_when_class_constructor_needs_args(tmp_path):
     assert "witness" in proc.stdout, f"expected at least one witness; got {proc.stdout[:500]}"
 
 
+def test_worker_persists_tainted_witness_to_corpus(tmp_path):
+    """When corpus_root + package_name + sink_family are set, a tainted
+    witness's input is written back to the corpus with the live marker
+    substituted to ``{MARKER}``."""
+    from arbiter.corpus import DirectoryWitnessCorpus, Scope
+    from arbiter.models import SinkFamily
+
+    marker = _make_marker()
+    spec = HarnessSpec(
+        target_module="vulnpkg.api",
+        target_qualname="eval_expression",
+        marker=marker,
+        max_examples=10,
+        strategy=StrategySpec(kind="text", seeds=["'{MARKER}' + str(1)"]),
+        sink_family=SinkFamily.code_exec,
+        corpus_root=str(tmp_path),
+        package_name="vulnpkg",
+    )
+    results, stderr = _run_worker(spec)
+    tainted = [
+        r for r in results if r.kind == "witness" and r.witness and r.witness.event.tainted
+    ]
+    assert tainted, f"no tainted witnesses; stderr={stderr}"
+
+    # Corpus should now contain the seed payload, with marker substituted back.
+    corpus = DirectoryWitnessCorpus(tmp_path)
+    family_view = list(corpus.fetch(Scope(sink_family=SinkFamily.code_exec)))
+    # The original payload (with placeholder restored) should be there.
+    assert any("{MARKER}" in p for p in family_view), family_view
+    assert all(marker not in p for p in family_view), (
+        "live UUID marker leaked into the persisted corpus"
+    )
+
+
 def test_worker_rejects_bad_spec():
     proc = subprocess.run(
         [sys.executable, "-m", "arbiter.worker"],

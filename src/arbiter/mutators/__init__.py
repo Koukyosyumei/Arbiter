@@ -23,6 +23,9 @@ from collections.abc import Callable, Iterator
 from itertools import cycle
 
 from arbiter.models import SinkFamily
+from arbiter.mutators import grammars
+from arbiter.mutators.grammar import enumerate_rule
+from arbiter.mutators.tokens import code_exec_token_variants
 
 MARKER_PLACEHOLDER = "{MARKER}"
 
@@ -85,46 +88,43 @@ def _materialize(seed: str, marker: str, kind: str) -> str | bytes:
     return s
 
 
+def _yield_grammar(rule, marker: str, kind: str) -> Iterator[str | bytes]:
+    """Adapt a grammar rule to the (marker, kind)-shaped variant iterator."""
+    for s in enumerate_rule(rule, marker=marker):
+        yield s.encode("utf-8", errors="replace") if kind == "bytes" else s
+
+
 def _process_variants(marker: str, kind: str) -> Iterator[str | bytes]:
-    """Shell-metachar permutations the static corpus may not enumerate."""
-    forms = [
-        "$(echo {MARKER})",
-        "`echo {MARKER}`",
-        ";echo {MARKER}",
-        "&&echo {MARKER}",
-        "\necho {MARKER}",
-        "\"; echo {MARKER}; \"",
-        "'; echo {MARKER}; '",
-    ]
-    for f in forms:
-        yield _materialize(f, marker, kind)
+    """Shell-metachar cross-product, plus command-substitution & quote-escape."""
+    yield from _yield_grammar(grammars.PROCESS, marker, kind)
+    yield from _yield_grammar(grammars.PROCESS_SUBST, marker, kind)
 
 
 def _deserialization_variants(marker: str, kind: str) -> Iterator[str | bytes]:
-    """Swap the called callable in a YAML python-tag payload.
+    """YAML python-tag cross-product over (tag-kind, callable, body-form).
 
     Only emits text variants; pickle-bytes payloads need REDUCE-opcode
     construction and are out of scope for v0.
     """
     if kind == "bytes":
         return
-    callables = [
-        "os.system",
-        "subprocess.getoutput",
-        "subprocess.call",
-        "os.popen",
-        "builtins.eval",
-        "builtins.exec",
-    ]
-    tags = ["object/apply", "object/new"]
-    for tag in tags:
-        for cb in callables:
-            yield f'!!python/{tag}:{cb} ["echo {marker}"]'
-    yield f'!!python/name:os.system  # {marker}'
+    yield from _yield_grammar(grammars.DESERIALIZATION, marker, kind)
+    # Tail variant: !!python/name carries the marker as an inline comment
+    # after a known callable. Not part of the linear cross-product.
+    yield f"!!python/name:os.system  # {marker}"
 
 
 def _code_exec_variants(marker: str, kind: str) -> Iterator[str | bytes]:
-    """Vary the literal/wrapper form carrying the marker into compile()."""
+    """Vary the literal/wrapper form carrying the marker into compile().
+
+    Yields in two passes:
+      1. Hand-rolled structural forms (literal + small wrappers).
+      2. Token-level mutations of each form via
+         :func:`arbiter.mutators.tokens.code_exec_token_variants`, which
+         operates on Python tokens to swap quote styles, prepend ``f``/``r``
+         prefixes, wrap in parens, and append marker-bearing comments — all
+         while preserving syntactic validity.
+    """
     forms = [
         "'{MARKER}'",
         "'{MARKER}' + ''",
@@ -135,22 +135,24 @@ def _code_exec_variants(marker: str, kind: str) -> Iterator[str | bytes]:
         "f'{MARKER}'",
         "1 + 1  # {MARKER}",
     ]
+    seen: set[str] = set()
     for f in forms:
-        yield _materialize(f, marker, kind)
+        materialized = f.replace(MARKER_PLACEHOLDER, marker)
+        if materialized not in seen:
+            seen.add(materialized)
+            yield materialized.encode("utf-8", errors="replace") if kind == "bytes" else materialized
+    for f in forms:
+        materialized = f.replace(MARKER_PLACEHOLDER, marker)
+        for v in code_exec_token_variants(materialized, marker):
+            if v in seen:
+                continue
+            seen.add(v)
+            yield v.encode("utf-8", errors="replace") if kind == "bytes" else v
 
 
 def _template_variants(marker: str, kind: str) -> Iterator[str | bytes]:
-    """Cover Jinja2 globals chains the static corpus may not enumerate."""
-    forms = [
-        f"{{{{ '{marker}' }}}}",
-        f"{{{{ '{marker}'.upper() }}}}",
-        f"{{% set x = '{marker}' %}}{{{{ x }}}}",
-        f"{{{{ cycler.__init__.__globals__.os.popen('echo {marker}').read() }}}}",
-        f"{{{{ lipsum.__globals__['os'].popen('echo {marker}').read() }}}}",
-        f"{{{{ joiner.__init__.__globals__.os.popen('echo {marker}').read() }}}}",
-    ]
-    for f in forms:
-        yield f.encode("utf-8", errors="replace") if kind == "bytes" else f
+    """Jinja2 SSTI cross-product: literal embeddings + globals-chain RCE."""
+    yield from _yield_grammar(grammars.TEMPLATE, marker, kind)
 
 
 _EXTENDERS: dict[SinkFamily, Callable[[str, str], Iterator[str | bytes]]] = {

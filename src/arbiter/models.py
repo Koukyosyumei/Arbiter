@@ -216,6 +216,16 @@ class HarnessSpec(BaseModel):
     # without family-specific structural variations (still useful for ad-hoc
     # tests that don't care about the family dispatch).
     sink_family: SinkFamily | None = None
+    # Cross-campaign witness-corpus root (filesystem path). When non-null and
+    # `package_name` is also set, the worker writes any tainted witness's
+    # input back to this corpus (with the live marker substituted to
+    # ``{MARKER}``) so future campaigns can replay it as a high-priority seed.
+    corpus_root: str | None = None
+    # Top-level package name, used together with `corpus_root` to scope
+    # corpus writes (Scope tier 2 = ``(family, package)``). The orchestrator
+    # already knows this; the worker doesn't have a way to derive it from
+    # `target_module` alone (target may live in a sub-package).
+    package_name: str | None = None
 
 
 class StrategySpec(BaseModel):
