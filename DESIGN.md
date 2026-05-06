@@ -219,16 +219,6 @@ input and breaks the loop — that's the witness. Target-side exceptions
 are tallied into the summary histogram but never gate the witness signal:
 the oracle is the sole signal.
 
-This replaces an earlier design that used `hypothesis.@given` as the
-driver and raised a sentinel exception to drive shrinking. Empirically
-the shrink phase contributed nothing measurable to witness rate at
-Arbiter's scale: the LLM-curated seeds already hit on the first or
-second example, and the structural seeds the shrinker tried to minimize
-(YAML tag forms, Jinja globals chains) have no smaller equivalent that
-still reaches the sink. The current loop is ~90 LOC shorter, has no
-flakiness path, and stops on the first witness rather than continuing
-to shrink past it.
-
 ### 5.4 Strategy → mutator hand-off
 
 `StrategySpec.kind` is the on-the-wire payload type:
