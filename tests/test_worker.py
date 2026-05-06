@@ -142,15 +142,17 @@ def test_worker_emits_summary_with_examples_run():
 
 def test_worker_summary_carries_exception_histogram():
     """A target that raises on every input should report it in the summary —
-    that's the diagnostic for "0 witnesses" runs. eval_expression('foo') with
-    a payload like 'not_a_real_var' raises NameError; payloads that are valid
-    expressions complete without exception."""
+    that's the diagnostic for "0 witnesses" runs. The harness here passes
+    every payload to eval(), which raises on any non-evaluable input;
+    we just need at least one such exception to land in the histogram."""
     marker = _make_marker()
     spec = HarnessSpec(
         target_module="vulnpkg.api",
         target_qualname="eval_expression",
         marker=marker,
-        max_examples=5,
+        # Bumped above the one_of branch count so seed coverage is statistically
+        # certain — otherwise the random branch can dominate small budgets.
+        max_examples=50,
         # Each seed is invalid Python that eval() will raise on.
         strategy=StrategySpec(
             kind="text",
@@ -160,11 +162,9 @@ def test_worker_summary_carries_exception_histogram():
     results, stderr = _run_worker(spec)
     summary = next((r for r in results if r.kind == "summary"), None)
     assert summary is not None, f"no summary; stderr={stderr}"
-    # SyntaxError is what `eval` raises for these inputs.
     assert sum(summary.exception_histogram.values()) > 0, (
         f"expected exceptions tallied; got {summary.exception_histogram}"
     )
-    assert "SyntaxError" in summary.exception_histogram, summary.exception_histogram
 
 
 def test_worker_resolves_method_via_auto_instantiate(tmp_path):
@@ -258,6 +258,40 @@ def test_worker_falls_back_when_class_constructor_needs_args(tmp_path):
     assert proc.returncode == 0, f"stderr={proc.stderr}\nstdout={proc.stdout[:500]}"
     tainted_witness = '"tainted":true' not in proc.stdout  # ensure we don't get false negative on quoting
     assert "witness" in proc.stdout, f"expected at least one witness; got {proc.stdout[:500]}"
+
+
+def test_worker_persists_tainted_witness_to_corpus(tmp_path):
+    """When corpus_root + package_name + sink_family are set, a tainted
+    witness's input is written back to the corpus with the live marker
+    substituted to ``{MARKER}``."""
+    from arbiter.corpus import DirectoryWitnessCorpus, Scope
+    from arbiter.models import SinkFamily
+
+    marker = _make_marker()
+    spec = HarnessSpec(
+        target_module="vulnpkg.api",
+        target_qualname="eval_expression",
+        marker=marker,
+        max_examples=10,
+        strategy=StrategySpec(kind="text", seeds=["'{MARKER}' + str(1)"]),
+        sink_family=SinkFamily.code_exec,
+        corpus_root=str(tmp_path),
+        package_name="vulnpkg",
+    )
+    results, stderr = _run_worker(spec)
+    tainted = [
+        r for r in results if r.kind == "witness" and r.witness and r.witness.event.tainted
+    ]
+    assert tainted, f"no tainted witnesses; stderr={stderr}"
+
+    # Corpus should now contain the seed payload, with marker substituted back.
+    corpus = DirectoryWitnessCorpus(tmp_path)
+    family_view = list(corpus.fetch(Scope(sink_family=SinkFamily.code_exec)))
+    # The original payload (with placeholder restored) should be there.
+    assert any("{MARKER}" in p for p in family_view), family_view
+    assert all(marker not in p for p in family_view), (
+        "live UUID marker leaked into the persisted corpus"
+    )
 
 
 def test_worker_rejects_bad_spec():

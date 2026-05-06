@@ -14,7 +14,7 @@ from arbiter.report import write_reports
 
 app = typer.Typer(
     name="arbiter",
-    help="LLM-augmented Hypothesis fuzzer for Python ACE detection.",
+    help="LLM-augmented payload fuzzer for Python ACE detection.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -60,7 +60,7 @@ def scan(
         typer.Option("--package-name", "-n", help="Importable package name. Defaults to dir basename."),
     ] = None,
     max_examples: Annotated[
-        int, typer.Option("--max-examples", help="Hypothesis examples per flow.")
+        int, typer.Option("--max-examples", help="Maximum payloads per flow before the worker stops.")
     ] = 100,
     confidence_threshold: Annotated[
         float,
@@ -114,6 +114,25 @@ def scan(
             ),
         ),
     ] = None,
+    corpus_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--corpus-root",
+            help=(
+                "Cross-campaign witness corpus directory. Tainted-witness "
+                "payloads are saved here and replayed as priority seeds on "
+                "future runs. Defaults to ~/.arbiter/corpus/. Pass "
+                "--no-corpus to disable."
+            ),
+        ),
+    ] = None,
+    no_corpus: Annotated[
+        bool,
+        typer.Option(
+            "--no-corpus",
+            help="Disable cross-campaign witness-corpus persistence.",
+        ),
+    ] = False,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="DEBUG logs (default is INFO).")
     ] = False,
@@ -140,6 +159,12 @@ def scan(
         typer.echo(f"error: {package_path} does not exist", err=True)
         raise typer.Exit(2)
 
+    if no_corpus:
+        effective_corpus_root: Path | None = None
+    else:
+        from arbiter.corpus import default_corpus_root
+        effective_corpus_root = corpus_root or default_corpus_root()
+
     config = CampaignConfig(
         package_path=package_path.resolve(),
         package_name=package_name or package_path.name,
@@ -150,6 +175,7 @@ def scan(
         max_targets=max_targets,
         artifact_dir=artifact_dir,
         resume_from=resume_from,
+        corpus_root=effective_corpus_root,
     )
 
     typer.echo(f"scanning {config.package_path} as {config.package_name!r}", err=True)

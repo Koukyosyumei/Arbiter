@@ -29,10 +29,15 @@ Arbiter is built as a multi-stage pipeline coordinated by a central orchestrator
 
 ### 2. Strategy Synthesis (The "How")
 * **Domain-Specific Payloads**: For each valid flow, an LLM generates tailored seeds (e.g., specific `pickle` gadgets or Jinja2 SSTI fragments) instead of relying solely on random mutation.
+* **Cross-Campaign Witness Corpus**: Payloads that fired tainted witnesses on past runs are persisted under `~/.arbiter/corpus/` and replayed ahead of LLM seeds on future campaigns. The corpus key is hierarchical (`(family, package, target)`), so a YAML python-tag payload that worked against `pkg.a.load_one` is automatically tried on `pkg.b.deserialize` too.
 
 ### 3. Isolated Fuzzing (The "Proof")
 * **Worker Subprocesses**: Fuzzing happens in isolated workers to prevent target crashes from killing the orchestrator.
-* **Hypothesis Integration**: Arbiter uses property-based testing to mutate inputs and "shrink" failures into the smallest possible proof-of-concept input.
+* **Per-Family Mutators**: Arbiter drives a hand-rolled fuzz loop with per-sink-family payload mutators (`src/arbiter/mutators/`). Three layers of payload generation:
+  * **Corpus replay** — proven witnesses from prior campaigns, ranked by depth-feedback score.
+  * **Grammar-driven variants** — a tiny `Rule`/`Choice` DFS engine (`mutators/grammar.py`) cross-products structural payload shapes per family (YAML tag × callable × body-form, shell separator × command × suffix, Jinja2 literal × globals-chain).
+  * **Token-aware mutations** — for `code_exec`, Python's `tokenize` module is used to swap quote forms, prepend `f`/`r` prefixes, and append marker-bearing trailing comments while preserving syntactic validity.
+  * Every yielded payload is by construction a candidate that *could* reach the sink — no random-text spray.
 
 ---
 

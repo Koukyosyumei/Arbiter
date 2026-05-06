@@ -83,14 +83,14 @@ execute attacker-chosen code. The canonical examples:
        ┌─────────────────────────────────────────────────────────────┐
        │ Worker subprocess (one per harness; isolated)               │
        │                                                             │
-       │   resource limits ─ sys.addaudithook ─ Hypothesis @given    │
+       │   resource limits ─ sys.addaudithook ─  mutator loop       │
        │              │              │                  │            │
        │              ▼              ▼                  ▼            │
-       │        RLIMIT_AS       Oracle            mutation +         │
-       │                     (marker taint)        shrinking         │
+       │        RLIMIT_AS       Oracle           seeds + variants    │
+       │                     (marker taint)        per family        │
        │                                                             │
-       │   on tainted event: raise _WitnessFound → Hypothesis        │
-       │   shrinks to minimal repro → emit Witness JSON              │
+       │   on tainted drain: capture input + events,                 │
+       │   emit Witness JSON, break the inner loop                   │
        └────────────────────────┬────────────────────────────────────┘
                                 ▼
                        Orchestrator collects ──► triage ──► report
@@ -184,7 +184,8 @@ This forces every fuzzing job into a fresh subprocess. Side benefits:
 - RSS limits via `RLIMIT_AS` are scoped per job.
 - A worker that hits a real exploit and crashes the interpreter doesn't
   poison the orchestrator.
-- Hypothesis state (database, settings) is reset per run.
+- No shared mutable state across workers — each one starts with a fresh
+  audit hook, a fresh oracle, and a fresh payload iterator.
 
 ### 5.2 IPC
 
@@ -197,30 +198,127 @@ exit   : 0 normal, 1 internal error
 The orchestrator enforces wall-clock timeout via `kill -9`. The worker
 enforces memory via `setrlimit(RLIMIT_AS)`.
 
-### 5.3 Hypothesis integration
+### 5.3 Mutator-driven fuzz loop
 
-A `_WitnessFound` exception is raised inside the `@given` test whenever
-the oracle drains a tainted event. Hypothesis treats this as a failing
-example and shrinks the input toward the minimal form that still triggers
-the exception. Because every shrink iteration also fires the audit hook
-and re-checks marker hits, shrinking converges on the *smallest input
-that still flows the marker into the sink* — which is exactly the minimal
-PoC.
+The worker drives a hand-rolled iterator, not a property-based test
+framework. `arbiter.mutators.variations(family, seeds, marker, budget,
+kind)` yields payloads in three tiers:
 
-The Hypothesis test never fails on target exceptions; the oracle is the
-sole signal.
+1. **Seeds verbatim** — every LLM-, static-corpus-, and witness-corpus-
+   derived seed with the `{MARKER}` placeholder substituted, in order.
+2. **Family-specific structural variants** — see §5.5. Each family with a
+   registered grammar yields the cross-product of its alternation/
+   concatenation tree (e.g. YAML tag × callable × body-form). Code_exec
+   additionally runs token-aware mutations on the canonical forms via
+   Python's `tokenize` module.
+3. **Cycled re-yields** of the seeds, until `max_examples` is reached.
 
-### 5.4 Strategy translation
+For each yielded payload, the worker calls `invoke(payload)`, then drains
+the oracle. The first drain that contains any tainted event captures the
+input and breaks the loop — that's the witness. Target-side exceptions
+are tallied into the summary histogram but never gate the witness signal:
+the oracle is the sole signal.
 
-`StrategySpec.kind` selects a generator family:
+This replaces an earlier design that used `hypothesis.@given` as the
+driver and raised a sentinel exception to drive shrinking. Empirically
+the shrink phase contributed nothing measurable to witness rate at
+Arbiter's scale: the LLM-curated seeds already hit on the first or
+second example, and the structural seeds the shrinker tried to minimize
+(YAML tag forms, Jinja globals chains) have no smaller equivalent that
+still reaches the sink. The current loop is ~90 LOC shorter, has no
+flakiness path, and stops on the first witness rather than continuing
+to shrink past it.
 
-- `text` — `st.text()` with marker prefix prepended; one_of with seed strategies.
-- `bytes` — `st.binary()` with marker bytes prepended.
+### 5.4 Strategy → mutator hand-off
 
-`seeds` are literal payloads carrying the `{MARKER}` placeholder; the worker
-substitutes the real UUID and registers each as `st.just(...)` so they're
-always tried. This is how known-bad payloads (pickle gadgets, YAML
-`!!python/object/apply`, Jinja SSTI fragments) enter the corpus.
+`StrategySpec.kind` is the on-the-wire payload type:
+
+- `text` — seeds and variants are passed to the target as `str`.
+- `bytes` — seeds and variants are UTF-8 encoded before being passed.
+
+`seeds` carries the literal `{MARKER}` placeholder; the worker
+substitutes the real UUID at materialization time. `HarnessSpec.sink_family`
+selects which family-specific extender (if any) the mutator runs after
+the canonical seeds. Families with no registered extender (xml, path,
+import) fall straight through from canonical seeds to seed cycling — the
+LLM and the static corpus carry the load there.
+
+The orchestrator merges *three* sources of seeds before sending them to
+the worker, in priority order: cross-campaign **witness corpus** (§5.5)
+→ curated **static corpus** (`payloads/`) → LLM-synthesized variations.
+Earliest-yielded seeds dominate the worker's budget, so a payload that
+worked yesterday is tried before today's LLM guess.
+
+### 5.5 Cross-campaign witness corpus
+
+`arbiter.corpus.WitnessCorpus` persists tainted-witness payloads to disk
+so future campaigns can replay them as zeroth-tier seeds. The on-disk
+schema is borrowed from Hypothesis's `ExampleDatabase` (key-addressed
+bytes store with `save`/`fetch`), but the *key schema* is hierarchical
+because ACE payloads transfer well across targets:
+
+```
+Scope = (sink_family, package?, target_fqn?)
+
+tier 1 (narrowest): (family, package, target_fqn)
+tier 2:             (family, package)
+tier 3 (broadest):  (family,)
+```
+
+`save(scope, payload, marker, score)` broadcasts the payload to every
+tier of `scope`. `fetch(scope)` unions across tiers, deduplicates, and
+yields in descending **depth-feedback score** order — the score is
+captured at save time as the count of audit events triggered by the
+payload, so payloads that exercised more of the call chain (parser →
+resolver → sink) outrank shallow short-circuits on replay.
+
+The corpus is scoped per-user under `~/.arbiter/corpus/` by default
+(overridable via `--corpus-root` or disabled via `--no-corpus`).
+Storage is append-only JSONL — single-line writes are atomic for
+sub-PIPE_BUF sizes on POSIX, which covers ACE payloads comfortably,
+so no locking is needed across worker subprocesses.
+
+The live UUID marker is substituted back to the literal `{MARKER}`
+placeholder before storage so each campaign's payload is reusable
+across campaigns whose markers differ.
+
+### 5.6 Grammar engine + token-aware mutator
+
+The family extenders in §5.3 tier 2 are not hand-rolled string
+templates; they delegate to a tiny grammar DFS in
+`arbiter.mutators.grammar`:
+
+```python
+@dataclass(frozen=True)
+class Rule:    parts:   tuple[Node, ...]   # concatenation
+@dataclass(frozen=True)
+class Choice:  options: tuple[Node, ...]   # alternation
+```
+
+`enumerate_rule(rule, marker)` walks the cross-product depth-first and
+substitutes `{MARKER}` at yield. Each family's grammar lives in
+`arbiter.mutators.grammars`:
+
+| Family            | Grammar shape                                              | Cross-product size |
+|-------------------|------------------------------------------------------------|--------------------|
+| `deserialization` | `tag(2) × callable(6) × body-form(2)`                      | 24                 |
+| `process`         | `prefix(7) × payload(2) × suffix(3) + 4 substitution forms` | 46                 |
+| `template`        | `4 literal forms + 4 globals walkers × 1 op`               | 8                  |
+
+We deliberately don't support recursion, weights, or shrinker-friendly
+representations — generation is one DFS, no backtracking. The corpus
+this produces is finite and small (typically <100 payloads per family);
+the worker's `max_examples` cap clips it.
+
+For `code_exec`, structural grammar isn't expressive enough — every
+variant has to be a syntactically valid Python expression. The
+`arbiter.mutators.tokens` module re-tokenizes each canonical seed via
+the standard library's `tokenize` module and yields token-level
+mutations: swap STRING-token quote forms (`'X'` ↔ `"X"` ↔ `f'X'` ↔
+`r'X'`), wrap the whole expression in parens or an identity tuple, and
+append marker-bearing trailing comments. Every yield is a valid
+expression by construction; we never produce a string that
+`compile()` would reject.
 
 ---
 
@@ -335,5 +433,5 @@ While current isolation protects the orchestrator, the worker remains theoretica
 ### 8.3 Security Policy for Witnesses
 Until the v1 sandbox is fully integrated, Arbiter operates under a "harmless observation" policy:
 * Generated seeds use non-destructive payloads (e.g., `echo {MARKER}` instead of `rm -rf /`).
-* Witnesses are recorded even if the worker terminates abnormally, as the oracle drains events incrementally during the Hypothesis loop.
+* Witnesses are recorded even if the worker terminates abnormally, as the oracle drains events incrementally during the fuzz loop.
 * Users are advised not to run campaigns on untrusted, unreviewed packages outside of containerized or virtualized environments.

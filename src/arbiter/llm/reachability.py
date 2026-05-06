@@ -124,7 +124,7 @@ Omit the field when the path uses the default attacker model.
 
 # harness_module / harness_qualname
 
-The fuzzer worker calls `target(payload)` with one Hypothesis-generated
+The fuzzer worker calls `target(payload)` with one mutator-generated
 value. Most entry points (`main()`, class constructors, request handlers)
 have complex signatures and cannot be fuzzed directly that way.
 
