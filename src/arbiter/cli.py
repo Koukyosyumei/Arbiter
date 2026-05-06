@@ -14,7 +14,7 @@ from arbiter.report import write_reports
 
 app = typer.Typer(
     name="arbiter",
-    help="LLM-augmented Hypothesis fuzzer for Python ACE detection.",
+    help="LLM-augmented payload fuzzer for Python ACE detection.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -60,7 +60,7 @@ def scan(
         typer.Option("--package-name", "-n", help="Importable package name. Defaults to dir basename."),
     ] = None,
     max_examples: Annotated[
-        int, typer.Option("--max-examples", help="Hypothesis examples per flow.")
+        int, typer.Option("--max-examples", help="Maximum payloads per flow before the worker stops.")
     ] = 100,
     confidence_threshold: Annotated[
         float,

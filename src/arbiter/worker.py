@@ -22,25 +22,14 @@ import sys
 import traceback
 from typing import Any
 
-from hypothesis import HealthCheck, Phase, Verbosity, given, settings
-from hypothesis import strategies as st
-from hypothesis.errors import Flaky
-from hypothesis.strategies import SearchStrategy
-
+from arbiter import mutators
 from arbiter.models import (
     AuditEvent,
     HarnessSpec,
-    StrategySpec,
     Witness,
     WorkerResult,
 )
 from arbiter.oracle import ALWAYS_RECORD, Oracle
-
-MARKER_PLACEHOLDER = "{MARKER}"
-
-
-class _WitnessFound(Exception):
-    """Raised inside the Hypothesis test to drive shrinking toward a minimal repro."""
 
 
 def _emit(result: WorkerResult) -> None:
@@ -359,48 +348,15 @@ def _try_construct_with_defaults(cls: Any) -> Any:
         return None
 
 
-def _build_strategy(spec: StrategySpec, marker: str) -> SearchStrategy:
-    """Translate StrategySpec to a Hypothesis SearchStrategy.
-
-    The marker is woven into every input so a successful hit at the sink proves
-    the input flowed there. Two embedding modes:
-        - seeds:  literal payloads with {MARKER} placeholder, substituted here.
-        - random: free-form text/bytes; marker is concatenated into every value.
-    """
-    seed_strats: list[SearchStrategy] = []
-    for seed in spec.seeds:
-        materialized = seed.replace(MARKER_PLACEHOLDER, marker)
-        if spec.kind == "bytes":
-            seed_strats.append(st.just(materialized.encode("utf-8", errors="replace")))
-        else:
-            seed_strats.append(st.just(materialized))
-
-    if spec.kind == "bytes":
-        random = st.binary(max_size=spec.params.get("max_size", 1024)).map(
-            lambda b: marker.encode() + b"\x00" + b
-        )
-    else:
-        alphabet = spec.params.get("alphabet")
-        kw: dict[str, Any] = {"max_size": spec.params.get("max_size", 256)}
-        if alphabet:
-            kw["alphabet"] = alphabet
-        random = st.text(**kw).map(lambda s: f"{marker}\n{s}")
-
-    if seed_strats:
-        return st.one_of(random, *seed_strats)
-    return random
-
-
 def _run_one_harness(spec: HarnessSpec) -> None:
     target = _resolve_callable(spec.target_module, spec.target_qualname)
     oracle = Oracle(marker=spec.marker)
     oracle.install()
 
-    strategy = _build_strategy(spec.strategy, spec.marker)
-
-    captured: dict[str, Any] = {"input": None, "events": None}
-    examples_run = 0
+    captured_input: Any = None
+    captured_events: list[AuditEvent] | None = None
     untainted_events: list[AuditEvent] = []
+    examples_run = 0
     exception_histogram: dict[str, int] = {}
 
     # When the flow's attacker model is `loaded_file_content`, the entry takes
@@ -409,51 +365,37 @@ def _run_one_harness(spec: HarnessSpec) -> None:
     file_suffix = spec.payload_as_file_suffix
     invoke = _make_invoker(target, file_suffix)
 
-    @settings(
-        max_examples=spec.max_examples,
-        deadline=None,
-        verbosity=Verbosity.quiet,
-        suppress_health_check=list(HealthCheck),
-        phases=(Phase.generate,),
-        database=None,
+    payloads = mutators.variations(
+        family=spec.sink_family,
+        seeds=spec.strategy.seeds,
+        marker=spec.marker,
+        budget=spec.max_examples,
+        kind=spec.strategy.kind,
     )
-    @given(strategy)
-    def harness(payload: Any) -> None:
-        nonlocal examples_run
+
+    for payload in payloads:
         examples_run += 1
         try:
             invoke(payload)
         except BaseException as exc:
-            # Target exceptions don't matter for the witness signal — the oracle
-            # decides — but tally them so a "0 witnesses" run is diagnosable.
-            # Hypothesis' own _WitnessFound is raised below from this same try
-            # block context only on a successful witness, so it's fine to count
-            # other exceptions here without filtering.
+            # Target-side exceptions are not the witness signal — the oracle
+            # decides. Tally them so a "0 witnesses" run is diagnosable.
             name = type(exc).__name__
             exception_histogram[name] = exception_histogram.get(name, 0) + 1
         events = oracle.drain()
         tainted = [e for e in events if e.tainted]
         if tainted:
-            captured["input"] = payload
-            captured["events"] = tainted
-            raise _WitnessFound()
+            captured_input = payload
+            captured_events = tainted
+            break
         untainted_events.extend(e for e in events if e.name in ALWAYS_RECORD)
 
-    try:
-        harness()
-    except _WitnessFound:
-        pass
-    except Flaky:
-        # Hypothesis flakiness — first failure didn't reproduce. We still have
-        # captured["input"] from the original failing example.
-        pass
-
-    if captured["events"] is not None:
-        for ev in captured["events"]:
+    if captured_events is not None:
+        for ev in captured_events:
             witness = Witness(
                 target_fqn=f"{spec.target_module}:{spec.target_qualname}",
                 event=ev,
-                input_repr=repr(captured["input"]),
+                input_repr=repr(captured_input),
             )
             _emit(WorkerResult(kind="witness", witness=witness))
 

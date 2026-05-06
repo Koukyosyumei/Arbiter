@@ -79,9 +79,9 @@ What you should see:
 - Sink: `subprocess.run` (note also that `subprocess.Popen` fires under
   the hood).
 - Target: `shell_cat.head_file(path: str, lines: int = 10) -> str`.
-- A **TAINTED** witness against `subprocess.Popen` — Hypothesis will shrink
-  the input to something like `; <marker>` because the marker survives the
-  f-string interpolation into the command line.
+- A **TAINTED** witness against `subprocess.Popen` — the seed payload
+  (e.g. `; echo <marker>`) survives the f-string interpolation into the
+  command line, so the marker shows up in `Popen`'s argv.
 
 ### 3. `pickle_session` — `deserialization` via `pickle.loads`
 

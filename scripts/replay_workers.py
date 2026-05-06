@@ -106,6 +106,7 @@ def main() -> int:
                 max_examples=args.max_examples,
                 timeout_s=args.worker_timeout,
                 payload_as_file_suffix=file_suffix,
+                sink_family=flow.sink.family,
             )
         )
 

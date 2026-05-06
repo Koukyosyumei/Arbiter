@@ -212,13 +212,20 @@ class HarnessSpec(BaseModel):
     # parses the contents — without this, the fuzzer would feed payload bytes
     # directly to a parameter the target tries to `open()` as a filesystem path.
     payload_as_file_suffix: str | None = None
+    # Selects the per-family payload mutator. None => yield seeds verbatim
+    # without family-specific structural variations (still useful for ad-hoc
+    # tests that don't care about the family dispatch).
+    sink_family: SinkFamily | None = None
 
 
 class StrategySpec(BaseModel):
-    """A description of how to generate inputs. Worker translates to Hypothesis.
+    """A description of how to generate inputs. Worker feeds to ``arbiter.mutators``.
 
-    `kind` selects a generator family; `params` carries family-specific options.
-    `seeds` is a small corpus the worker mixes into the strategy via `one_of`.
+    `kind` is "text" or "bytes" — controls whether seeds are passed to the
+    target as ``str`` or UTF-8 encoded ``bytes``. `params` is reserved for
+    future per-family knobs. `seeds` is the LLM- and corpus-derived list of
+    payloads that the worker yields verbatim (with ``{MARKER}`` substituted)
+    before falling back to family-specific structural variations.
     """
 
     kind: str  # "text" | "bytes" | "yaml" | "pickle" | "template" | "shell" | "path"

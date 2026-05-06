@@ -32,7 +32,7 @@ Arbiter is built as a multi-stage pipeline coordinated by a central orchestrator
 
 ### 3. Isolated Fuzzing (The "Proof")
 * **Worker Subprocesses**: Fuzzing happens in isolated workers to prevent target crashes from killing the orchestrator.
-* **Hypothesis Integration**: Arbiter uses property-based testing to mutate inputs and "shrink" failures into the smallest possible proof-of-concept input.
+* **Per-Family Mutators**: Arbiter drives a hand-rolled fuzz loop with per-sink-family payload mutators (`src/arbiter/mutators/`) that yield curated seeds first, then structurally valid variations (e.g. swap the YAML python-tag callable, swap the shell separator). Every yielded payload is by construction a candidate that *could* reach the sink — no random-text spray.
 
 ---
 

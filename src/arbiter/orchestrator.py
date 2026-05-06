@@ -636,6 +636,7 @@ def run_campaign(
                 timeout_s=config.worker_timeout_s,
                 rss_limit_mb=config.rss_limit_mb,
                 payload_as_file_suffix=file_suffix,
+                sink_family=flow.sink.family,
             )
             future = pool.submit(
                 _run_worker, spec, config.worker_timeout_s + 30, pythonpath_extra

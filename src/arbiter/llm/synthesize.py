@@ -270,7 +270,7 @@ def synthesize_strategy(
     llm: LLMClient | None = None,
     max_tokens: int = 2048,
 ) -> StrategySpec:
-    """Ask the LLM for a Hypothesis strategy spec for this (target, sink).
+    """Ask the LLM for a strategy spec for this (target, sink).
 
     On a malformed response (no marker-bearing seeds), returns a minimal
     fallback strategy so the caller can still launch a worker. The caller
