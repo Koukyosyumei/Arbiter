@@ -632,3 +632,70 @@ def test_run_campaign_resume_skips_completed_llm_stages(monkeypatch, tmp_path: P
     assert result.flows == [flow]
     assert list(result.strategies) == [orch._flow_key(flow)]
     assert len(ran_workers) == 1
+
+
+def test_run_campaign_dispatches_workers_during_synthesis(monkeypatch):
+    """Pipelining: a worker must start before the last synthesize_strategy call
+    finishes. Otherwise the executor sits idle for the entire synthesis phase
+    (≈30-180s per flow on real campaigns)."""
+    import threading
+    import time
+
+    target = _eval_target()
+    # Three flows hitting the same target at distinct sink sites — _flow_key
+    # uses file:line, so each gets its own synth call and harness.
+    flows = [
+        Flow(
+            target_fqn=target.fqn,
+            sink=Sink(
+                family=SinkFamily.code_exec,
+                callable_qualname="eval",
+                file=str(VULNPKG_PATH / "api.py"),
+                line=line,
+            ),
+            confidence=0.9,
+        )
+        for line in (14, 15, 16)
+    ]
+
+    monkeypatch.setattr(orch, "discover_targets", lambda *a, **kw: [target])
+    monkeypatch.setattr(orch, "analyze_reachability", lambda *a, **kw: flows)
+
+    synth_finish_times: list[float] = []
+    worker_start_times: list[float] = []
+    lock = threading.Lock()
+
+    def slow_synth(t, s, flow=None, **kw):
+        # Simulate a slow LLM call so the pipeline has measurable overlap.
+        time.sleep(0.05)
+        with lock:
+            synth_finish_times.append(time.monotonic())
+        return _eval_strategy()
+
+    def fast_worker(spec, timeout_s, pythonpath_extra=None):
+        with lock:
+            worker_start_times.append(time.monotonic())
+        return []  # no witnesses, no errors — only timing matters
+
+    monkeypatch.setattr(orch, "synthesize_strategy", slow_synth)
+    monkeypatch.setattr(orch, "_run_worker", fast_worker)
+
+    config = orch.CampaignConfig(
+        package_path=VULNPKG_PATH,
+        package_name="vulnpkg",
+        parallelism=2,
+    )
+    orch.run_campaign(config, llm=object())
+
+    assert len(synth_finish_times) == 3, "expected 3 synth calls"
+    assert len(worker_start_times) == 3, "expected 3 worker dispatches"
+
+    # Pipelining assertion: the first worker must enter before the last synth
+    # finishes. With the old serial dispatch (executor created after the synth
+    # loop), this would be impossible — every worker_start_time would be
+    # strictly greater than max(synth_finish_times).
+    assert min(worker_start_times) < max(synth_finish_times), (
+        f"workers did not overlap with synthesis: "
+        f"first worker @ {min(worker_start_times):.4f}, "
+        f"last synth @ {max(synth_finish_times):.4f}"
+    )

@@ -111,6 +111,7 @@ class ClaudeHeadlessClient:
                 max_turns=current_max_turns,
                 system_mode=system_mode,
             )
+            t_call = time.monotonic()
             try:
                 wrapper = self._invoke(cmd, timeout=timeout)
             except subprocess.TimeoutExpired as exc:
@@ -147,6 +148,20 @@ class ClaudeHeadlessClient:
                     time.sleep(RETRY_BACKOFF_S)
                     continue
                 raise
+            # Surface call shape so the operator can see model/turns/cost without
+            # re-running with -v. Cost is in USD, num_turns reflects how many tool
+            # cycles the agent ran (relevant for tools="" → expect 1).
+            num_turns = wrapper.get("num_turns")
+            cost = wrapper.get("total_cost_usd") or wrapper.get("cost_usd")
+            cost_str = f", cost=${cost:.4f}" if isinstance(cost, (int, float)) else ""
+            turns_str = f", turns={num_turns}" if num_turns is not None else ""
+            log.info(
+                "claude -p [%s] %.1fs%s%s",
+                self.model,
+                time.monotonic() - t_call,
+                turns_str,
+                cost_str,
+            )
             return _extract_json(wrapper, schema=schema)
         # unreachable — loop either returns or raises
         raise RuntimeError(f"unreachable: last_err={last_err!r}")
@@ -187,31 +202,127 @@ class ClaudeHeadlessClient:
         return cmd
 
     def _invoke(self, cmd: list[str], timeout: float) -> dict[str, Any]:
-        """Run claude -p once; raise RuntimeError on non-zero exit, propagate
-        TimeoutExpired. Returns the parsed wrapper JSON on success."""
-        proc = subprocess.run(
-            cmd,
-            input="",  # explicit empty stdin so claude doesn't wait
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env={**os.environ},
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(_format_exit_error(proc))
+        """Run claude -p with stream-json output; surface tool calls in logs
+        as they arrive, return the final result wrapper.
 
+        Raises RuntimeError on non-zero exit, propagates TimeoutExpired.
+        Tests monkeypatch the module-level `_stream_invoke` rather than
+        `subprocess.Popen` so they don't have to fake a streaming process.
+        """
+        # Switch the cmd built by _build_cmd from json to stream-json so we get
+        # one event per turn instead of a single wrapper at the end. --verbose
+        # is required by stream-json (claude refuses otherwise).
+        cmd = list(cmd)
+        fmt_idx = cmd.index("--output-format")
+        cmd[fmt_idx + 1] = "stream-json"
+        if "--verbose" not in cmd:
+            cmd.append("--verbose")
+        return _stream_invoke(cmd, timeout)
+
+
+def _summarize_tool_args(args: dict[str, Any]) -> str:
+    """One-line summary of a tool's input arguments for the log."""
+    if not args:
+        return ""
+    for key in ("pattern", "file_path", "path", "command", "query", "url"):
+        if key in args:
+            v = str(args[key])
+            return f" {v[:120]}{'…' if len(v) > 120 else ''}"
+    s = json.dumps(args, separators=(",", ":"))
+    return f" {s[:120]}{'…' if len(s) > 120 else ''}"
+
+
+def _stream_invoke(cmd: list[str], timeout: float) -> dict[str, Any]:
+    """Spawn `claude -p` with stream-json output, log tool calls + final
+    text as they arrive, and return the final `result` event wrapper.
+
+    Without `--include-partial-messages`, claude emits one event per
+    completed assistant message; each message's `content` is a list of
+    blocks (`thinking`, `tool_use`, `text`). We walk that list, log
+    `tool_use` and non-empty `text` blocks, and skip thinking. The final
+    result event has the same shape as the json-mode wrapper, so
+    `_extract_json` and the retry loop don't need to change.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ},
+    )
+    deadline = time.monotonic() + timeout
+    result_event: dict[str, Any] | None = None
+    try:
+        while True:
+            if time.monotonic() > deadline:
+                proc.kill()
+                proc.wait()
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+            line = proc.stdout.readline() if proc.stdout else ""
+            if line == "":
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            t = obj.get("type")
+            if t == "result":
+                result_event = obj
+                continue
+            if t != "assistant":
+                continue
+            content = (obj.get("message") or {}).get("content") or []
+            for block in content:
+                btype = block.get("type")
+                if btype == "tool_use":
+                    name = block.get("name", "?")
+                    # StructuredOutput is the synthetic schema-emit "tool"; the
+                    # orchestrator already surfaces the resulting payload in
+                    # its next log line, and the truncated raw blob isn't
+                    # readable anyway.
+                    if name == "StructuredOutput":
+                        continue
+                    args = block.get("input") or {}
+                    log.info("  ↳ %s%s", name, _summarize_tool_args(args))
+                elif btype == "text":
+                    text = (block.get("text") or "").strip()
+                    if text:
+                        log.info(
+                            "  haiku: %s",
+                            text[:240] + ("…" if len(text) > 240 else ""),
+                        )
+    finally:
         try:
-            wrapper = json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"claude -p emitted non-JSON wrapper (returncode 0): {proc.stdout[:400]!r}"
-            ) from exc
+            proc.wait(timeout=max(1.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
-        if wrapper.get("is_error"):
-            raise RuntimeError(
-                f"claude -p reported error: {wrapper.get('result') or wrapper.get('subtype')}"
-            )
-        return wrapper
+    stderr = proc.stderr.read() if proc.stderr else ""
+
+    if proc.returncode != 0:
+        from types import SimpleNamespace
+        view = SimpleNamespace(
+            returncode=proc.returncode,
+            stdout=json.dumps(result_event) if result_event else "",
+            stderr=stderr,
+        )
+        raise RuntimeError(_format_exit_error(view))
+
+    if result_event is None:
+        raise RuntimeError(
+            f"claude -p stream ended without a 'result' event (stderr={stderr[:300]!r})"
+        )
+    if result_event.get("is_error"):
+        raise RuntimeError(
+            f"claude -p reported error: "
+            f"{result_event.get('result') or result_event.get('subtype')}"
+        )
+    return result_event
 
 
 def _format_exit_error(proc: subprocess.CompletedProcess) -> str:

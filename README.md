@@ -39,10 +39,18 @@ Arbiter is built as a multi-stage pipeline coordinated by a central orchestrator
 ## Getting Started
 
 ### Install
-Requires Python 3.12+.
+Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
+
 ```bash
+uv venv                      # create .venv/
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
 uv pip install -e ".[dev]"
+arbiter --help               # verify the CLI is on PATH
 ```
+
+The `arbiter` command is installed via the `[project.scripts]` entry point
+in `pyproject.toml`, so it lands on your shell `PATH` as soon as the venv
+is active.
 
 ### Run a Scan
 Arbiter reuses your existing Claude Code authentication; no separate API keys are required.
@@ -50,6 +58,22 @@ Arbiter reuses your existing Claude Code authentication; no separate API keys ar
 ```bash
 arbiter scan path/to/package --package-name mypkg --output-json result.json
 ```
+
+### Try it on a toy bug
+The [`examples/`](examples/) directory contains four tiny packages — one per
+ACE family (`eval()`, shell injection, unsafe `pickle.loads`, Jinja2 SSTI) —
+each with a single public entry point that reaches its sink. Each scan
+finishes in under a minute and produces a tainted witness:
+
+```bash
+arbiter scan examples/eval_calc       --report-dir /tmp/eval_calc-report
+arbiter scan examples/shell_cat       --report-dir /tmp/shell_cat-report
+arbiter scan examples/pickle_session  --report-dir /tmp/pickle_session-report
+arbiter scan examples/jinja_render    --report-dir /tmp/jinja_render-report
+```
+
+See [`examples/README.md`](examples/README.md) for what to expect from each
+scan and how to read the output.
 
 See [`DESIGN.md`](DESIGN.md) for the architecture, threat model, detection
 mechanism, and roadmap.
