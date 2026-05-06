@@ -22,7 +22,7 @@
 
   <!-- Header -->
   <text x="480" y="44" text-anchor="middle" font-size="22" font-weight="700" fill="#f1f5f9">Arbiter — Architecture Overview</text>
-  <text x="480" y="68" text-anchor="middle" font-size="13" fill="#94a3b8">LLM-augmented property-based fuzzer for ACE primitives in Python</text>
+  <text x="480" y="68" text-anchor="middle" font-size="13" fill="#94a3b8">LLM-augmented payload fuzzer for ACE primitives in Python</text>
 
   <!-- Legend -->
   <g font-size="12.5" fill="#cbd5e1">
@@ -145,12 +145,12 @@
       <text x="480" y="675" text-anchor="middle" font-size="11.5" fill="#64748b">marker taint over event args</text>
     </g>
 
-    <!-- Inner: Hypothesis -->
+    <!-- Inner: Mutators -->
     <g>
       <rect x="630" y="614" width="220" height="74" rx="7" fill="#1e293b" stroke="#475569" stroke-width="1.2"/>
-      <text x="740" y="636" text-anchor="middle" font-size="13.5" font-weight="700" fill="#e2e8f0">Hypothesis @given</text>
-      <text x="740" y="656" text-anchor="middle" font-size="12" fill="#94a3b8">mutation + shrinking</text>
-      <text x="740" y="675" text-anchor="middle" font-size="11.5" fill="#64748b">minimizes proof-of-concept</text>
+      <text x="740" y="636" text-anchor="middle" font-size="13.5" font-weight="700" fill="#e2e8f0">Mutator Loop</text>
+      <text x="740" y="656" text-anchor="middle" font-size="12" fill="#94a3b8">arbiter.mutators · per-family</text>
+      <text x="740" y="675" text-anchor="middle" font-size="11.5" fill="#64748b">seeds + structural variants</text>
     </g>
 
     <!-- Internal flow arrows -->
