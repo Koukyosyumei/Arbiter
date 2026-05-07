@@ -83,6 +83,10 @@ scan and how to read the output.
 See [`DESIGN.md`](DESIGN.md) for the architecture, threat model, detection
 mechanism, and roadmap.
 
+## Trophies
+
+https://github.com/leo-editor/leo-editor/issues/4662
+
 ---
 
 ## License
